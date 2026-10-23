@@ -1,0 +1,23 @@
+#!/bin/bash
+set -e
+RATE="{{ dns_ratelimit_pps | default(100) }}/sec"
+BURST="{{ (dns_ratelimit_pps | default(100) | int) * 2 }}"
+for proto in udp tcp; do
+  iptables -C FORWARD -i boxd-br0 -p "$proto" --dport 53 \
+      -m hashlimit --hashlimit-mode srcip --hashlimit-above "$RATE" \
+      --hashlimit-burst "$BURST" --hashlimit-name "dnsflood_$proto" -j DROP 2>/dev/null \
+    || iptables -I FORWARD -i boxd-br0 -p "$proto" --dport 53 \
+      -m hashlimit --hashlimit-mode srcip --hashlimit-above "$RATE" \
+      --hashlimit-burst "$BURST" --hashlimit-name "dnsflood_$proto" -j DROP
+done
+
+ERATE="{{ dns_egress_ratelimit_pps | default(200) }}/sec"
+EBURST="{{ (dns_egress_ratelimit_pps | default(200) | int) * 2 }}"
+for proto in udp tcp; do
+  iptables -C OUTPUT -p "$proto" --dport 53 \
+      -m hashlimit --hashlimit-mode dstip --hashlimit-above "$ERATE" \
+      --hashlimit-burst "$EBURST" --hashlimit-name "dnsout_$proto" -j DROP 2>/dev/null \
+    || iptables -I OUTPUT -p "$proto" --dport 53 \
+      -m hashlimit --hashlimit-mode dstip --hashlimit-above "$ERATE" \
+      --hashlimit-burst "$EBURST" --hashlimit-name "dnsout_$proto" -j DROP
+done

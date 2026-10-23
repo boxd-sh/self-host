@@ -1,0 +1,171 @@
+- name: Install boxd-proxy service
+  import_role:
+    name: boxd-common
+    tasks_from: install-service
+  vars:
+    boxd_binary: boxd-proxy
+    boxd_service: boxd-proxy
+    boxd_role_name: proxy
+
+- name: Create console directory
+  file:
+    path: /var/lib/boxd/console
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+
+- name: Enable IP forwarding (port-forward DNAT)
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+
+- name: Install SSH port-range REDIRECT script
+  template:
+    src: boxd-ssh-redirect.sh.j2
+    dest: /usr/local/bin/boxd-ssh-redirect.sh
+    mode: "0755"
+
+- name: Run SSH port-range REDIRECT setup
+  command: /usr/local/bin/boxd-ssh-redirect.sh
+  changed_when: false
+
+- name: Install SSH port-range REDIRECT systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd per-VM SSH port REDIRECT (10000-30000 -> proxy SSH)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/boxd-ssh-redirect.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-ssh-redirect.service
+    mode: "0644"
+
+- name: Enable SSH port-range REDIRECT service
+  systemd:
+    name: boxd-ssh-redirect
+    enabled: true
+    daemon_reload: true
+
+- name: Create TLS directory
+  file:
+    path: /etc/boxd/tls
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0750"
+
+- name: Copy TLS certificate
+  copy:
+    src: "{{ boxd_tls_local_dir }}/wildcard.pem"
+    dest: /etc/boxd/tls/wildcard.pem
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0644"
+  notify: restart boxd service
+
+- name: Copy SSH host key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/proxy_host_ed25519"
+    dest: /etc/boxd/tls/proxy_host_ed25519
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  notify: restart boxd service
+
+- name: Copy TLS key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/wildcard.key"
+    dest: /etc/boxd/tls/wildcard.key
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  notify: restart boxd service
+
+- name: Check whether boxd-console is installed on this host
+  stat:
+    path: /etc/systemd/system/boxd-console.service
+  register: boxd_console_unit
+
+- name: Copy GitHub App private key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/{{ boxd_github_app_key }}"
+    dest: /etc/boxd/tls/github-app.pem
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  notify: restart boxd-console
+  when: boxd_github_app_key is defined
+
+- name: Create VXLAN tunnels to workers
+  command: "ip link add vxlan{{ item.vni }} type vxlan id {{ item.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
+  loop: "{{ boxd_workers }}"
+  register: vxlan_create
+  failed_when: vxlan_create.rc != 0 and 'File exists' not in vxlan_create.stderr
+  changed_when: vxlan_create.rc == 0
+
+- name: Add FDB entries for workers
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ item.vni }} dst {{ item.vrack_ip }}"
+  loop: "{{ boxd_workers }}"
+  changed_when: false
+  failed_when: false
+
+- name: Assign IPs on VXLAN interfaces
+  command: "ip addr add {{ item.bridge_subnet | regex_replace('0\\.0/16$', '0.' ~ (254 - groups['proxy'].index(inventory_hostname)) | string ~ '/16') }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers }}"
+  register: vxlan_ip
+  failed_when: vxlan_ip.rc != 0 and 'already assigned' not in vxlan_ip.stderr
+  changed_when: vxlan_ip.rc == 0
+
+- name: Bring up VXLAN interfaces
+  command: "ip link set vxlan{{ item.vni }} up"
+  loop: "{{ boxd_workers }}"
+  changed_when: false
+
+- name: Route VM subnets via VXLAN
+  command: "ip route replace {{ item.bridge_subnet }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers }}"
+  changed_when: false
+
+- name: Install VXLAN startup script
+  template:
+    src: boxd-vxlan.sh.j2
+    dest: /usr/local/bin/boxd-vxlan.sh
+    mode: "0755"
+
+- name: Install VXLAN systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd VXLAN overlay
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/boxd-vxlan.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-vxlan.service
+    mode: "0644"
+
+- name: Enable VXLAN service
+  systemd:
+    name: boxd-vxlan
+    enabled: true
+    daemon_reload: true
+
+- name: Enable and start boxd-proxy
+  systemd:
+    name: boxd-proxy
+    enabled: true
+    state: started
+    daemon_reload: true

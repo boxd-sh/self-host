@@ -1,0 +1,7 @@
+network:
+  version: 2
+  bridges:
+    boxd-br0:
+      addresses:
+        - {{ bridge_gateway }}/16
+      mtu: 1500

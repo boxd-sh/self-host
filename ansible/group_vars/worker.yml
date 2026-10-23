@@ -1,0 +1,7 @@
+boxd_binary: boxd-worker
+boxd_service: boxd-worker
+boxd_role_name: worker
+
+boxd_data_dir: /mnt/boxd-data
+boxd_volume_mount: /mnt/boxd-data
+

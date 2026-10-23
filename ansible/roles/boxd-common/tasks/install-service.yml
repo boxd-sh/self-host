@@ -1,0 +1,73 @@
+- name: "Ensure {{ boxd_role_name }} state directories"
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  loop:
+    - "/var/lib/boxd/{{ boxd_role_name }}"
+    - "/var/lib/boxd/{{ boxd_role_name }}/raft"
+
+- name: "Copy {{ boxd_binary }} binary"
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/{{ boxd_binary }}"
+    dest: "/usr/local/bin/{{ boxd_binary }}"
+    mode: preserve
+  notify: restart boxd service
+
+- name: "Set {{ boxd_binary }} permissions"
+  file:
+    path: "/usr/local/bin/{{ boxd_binary }}"
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: "Copy {{ boxd_role_name }} config"
+  copy:
+    src: "{{ boxd_config_local_dir }}/{{ inventory_hostname }}/{{ boxd_role_name }}.toml"
+    dest: "{{ boxd_config_dir }}/{{ boxd_role_name }}.toml"
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0640"
+  notify: restart boxd service
+
+- name: "Install {{ boxd_service }} systemd unit"
+  template:
+    src: boxd.service.j2
+    dest: "/etc/systemd/system/{{ boxd_service }}.service"
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart boxd service
+
+- name: "Load build manifest for the {{ boxd_binary }} deploy record"
+  set_fact:
+    boxd_build_info: "{{ (lookup('file', boxd_release_dir ~ '/BUILD_INFO.json', errors='ignore') | default('{}', true)) | from_json }}"
+
+- name: "Ensure deploy-record directory"
+  file:
+    path: /var/lib/boxd/deployed.d
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  when: boxd_build_info.commit is defined
+
+- name: "Record deployed {{ boxd_binary }} version"
+  copy:
+    content: "{{ record | to_nice_json }}\n"
+    dest: "/var/lib/boxd/deployed.d/{{ boxd_binary }}.json"
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0644"
+  vars:
+    record:
+      artifact: "{{ boxd_binary }}"
+      commit: "{{ boxd_build_info.commit }}"
+      branch: "{{ boxd_build_info.branch | default('') }}"
+      dirty: "{{ boxd_build_info.dirty | default(false) }}"
+      built_at: "{{ boxd_build_info.built_at | default('') }}"
+      sha256: "{{ boxd_build_info.artifacts[boxd_binary] | default('') }}"
+      method: ansible
+  when: boxd_build_info.commit is defined

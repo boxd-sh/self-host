@@ -1,0 +1,19 @@
+<clickhouse>
+    <users>
+        <default>
+            <password>{{ clickhouse_password }}</password>
+            <networks>
+                <ip>{{ clickhouse_allowed_network }}</ip>
+                <ip>127.0.0.1</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+        </default>
+    </users>
+
+    <profiles>
+        <default>
+            <max_memory_usage>4000000000</max_memory_usage>
+        </default>
+    </profiles>
+</clickhouse>

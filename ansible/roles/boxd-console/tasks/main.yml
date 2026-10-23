@@ -1,0 +1,119 @@
+---
+
+- name: Install boxd-console service
+  import_role:
+    name: boxd-common
+    tasks_from: install-service
+  vars:
+    boxd_binary: boxd-console
+    boxd_service: boxd-console
+    boxd_role_name: console
+
+- name: Create console replica state dir
+  file:
+    path: /var/lib/boxd/console-replica
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0750"
+
+- name: Create TLS dir
+  file:
+    path: /etc/boxd/tls
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0750"
+  when: boxd_github_app_key is defined
+
+- name: Copy GitHub App private key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/{{ boxd_github_app_key }}"
+    dest: /etc/boxd/tls/github-app.pem
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  notify: restart boxd service
+  when: boxd_github_app_key is defined
+
+- name: Ensure console/downloads asset dirs exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  loop:
+    - /var/lib/boxd/console
+    - /var/lib/boxd/downloads
+
+- name: Ship console SPA from assets
+  unarchive:
+    src: "{{ boxd_assets_dir }}/console.tar.gz"
+    dest: /var/lib/boxd/console/
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+
+- name: Check for CLI download artifacts
+  stat:
+    path: "{{ boxd_downloads_local_dir | default('') }}/install.sh"
+  delegate_to: localhost
+  become: false
+  register: cli_downloads
+
+- name: Ship CLI download artifacts
+  when: cli_downloads.stat.exists | default(false)
+  block:
+    - name: Ensure downloads/cli directory
+      file:
+        path: /var/lib/boxd/downloads/cli
+        state: directory
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0755"
+
+    - name: Ship install.sh
+      copy:
+        src: "{{ boxd_downloads_local_dir }}/install.sh"
+        dest: /var/lib/boxd/downloads/install.sh
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+
+    - name: Ship CLI manifests + version
+      copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+      with_fileglob:
+        - "{{ boxd_downloads_local_dir }}/cli/*"
+
+    - name: Ship CLI binaries (all platforms)
+      boxd_copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0755"
+      with_fileglob:
+        - "{{ boxd_assets_dir }}/cli/boxd-*"
+
+    - name: Ship CLI skills (optional in the assets zip)
+      copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+      with_fileglob:
+        - "{{ boxd_assets_dir }}/cli/skill.md"
+        - "{{ boxd_assets_dir }}/cli/skills.tar.gz"
+
+- name: Enable and start boxd-console
+  systemd:
+    name: boxd-console
+    enabled: true
+    state: started
+    daemon_reload: true

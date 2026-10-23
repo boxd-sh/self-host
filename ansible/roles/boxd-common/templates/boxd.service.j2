@@ -1,0 +1,53 @@
+[Unit]
+Description=boxd {{ boxd_service }}
+After=network-online.target
+Wants=network-online.target
+[Service]
+Environment=RUST_LOG=info
+Environment=NO_COLOR=1
+{% if boxd_service == 'boxd-control' %}
+Environment=BOXD_METRICS_LISTEN=127.0.0.1:9101
+{% elif boxd_service == 'boxd-proxy' %}
+Environment=BOXD_METRICS_LISTEN=127.0.0.1:9102
+{% elif boxd_service == 'boxd-console' %}
+Environment=BOXD_METRICS_LISTEN=127.0.0.1:9105
+Environment=BOXD_CONSOLE_CONTROL={{ console_control_endpoints | default(groups['control'] | map('extract', hostvars, 'vrack_ip') | map('regex_replace', '^', 'http://') | map('regex_replace', '$', ':7100') | join(',')) }}
+Environment=BOXD_CONSOLE_STATE_DB=/var/lib/boxd/console-replica/state.db
+Environment=BOXD_CONSOLE_DIR=/var/lib/boxd/console
+Environment=BOXD_CONSOLE_DOWNLOADS_DIR=/var/lib/boxd/downloads
+Environment=BOXD_CONSOLE_LISTEN=0.0.0.0:8080
+{% elif boxd_service == 'boxd-dns' %}
+Environment=BOXD_METRICS_LISTEN=127.0.0.1:9103
+{% elif boxd_service == 'boxd-worker' %}
+Environment=BOXD_METRICS_LISTEN=127.0.0.1:9104
+Environment=BOXD_TEMPLATE_WARMUP_ANTHROPIC_KEY={{ boxd_template_warmup_anthropic_key | default('') }}
+{% endif %}
+ExecStart=/usr/local/bin/{{ boxd_binary }} --config={{ boxd_config_dir }}/{{ boxd_role_name }}.toml
+Restart=always
+RestartSec=5s
+{% if boxd_service == 'boxd-worker' %}
+KillMode=process
+{% endif %}
+User={{ boxd_user }}
+Group={{ boxd_group }}
+{% if boxd_service == 'boxd-control' and boxd_local_ca | default(false) %}
+SupplementaryGroups=boxd-ca
+{% endif %}
+LimitNOFILE=65536
+Slice=boxd.slice
+StandardOutput=journal
+StandardError=journal
+{% if boxd_service == 'boxd-worker' %}
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_BPF CAP_PERFMON CAP_DAC_OVERRIDE CAP_MKNOD CAP_NET_BIND_SERVICE
+Delegate=yes
+RuntimeDirectory=boxd boxd/vms
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+{% elif boxd_service == 'boxd-proxy' %}
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+{% elif boxd_service == 'boxd-dns' %}
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

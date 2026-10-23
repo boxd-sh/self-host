@@ -1,0 +1,3 @@
+boxd_binary: boxd-control
+boxd_service: boxd-control
+boxd_role_name: control

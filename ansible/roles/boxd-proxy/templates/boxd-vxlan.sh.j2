@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+LOCAL_IP={{ vrack_ip }}
+
+{% for worker in boxd_workers %}
+IFACE="vxlan{{ worker.vni }}"
+EXPECTED_IP="{{ worker.bridge_subnet | regex_replace('0\\.0/16$', '0.' ~ (254 - groups['proxy'].index(inventory_hostname)) | string ~ '/16') }}"
+if ! ip link show "$IFACE" &>/dev/null; then
+    ip link add "$IFACE" type vxlan id {{ worker.vni }} local "$LOCAL_IP" dstport 4789 nolearning
+    ip link set "$IFACE" up
+fi
+CURRENT=$(ip -4 -o addr show dev "$IFACE" | awk '{print $4}' | sort | tr '\n' ' ')
+if [ "$CURRENT" != "$EXPECTED_IP " ]; then
+    ip addr flush dev "$IFACE"
+    ip addr add "$EXPECTED_IP" dev "$IFACE"
+fi
+bridge fdb replace 00:00:00:00:00:00 dev "$IFACE" dst {{ worker.vrack_ip }} self permanent
+ip route replace {{ worker.bridge_subnet }} dev "$IFACE"
+{% endfor %}

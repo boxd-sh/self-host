@@ -1,0 +1,31 @@
+__pycache__/
+
+.terraform*/
+*.tfstate*
+
+ansible/group_vars/*_*.yml
+
+out/
+state/
+cache/
+
+# decrypted state / rendered configs (README "State and recovery")
+pulled-state/
+rendered/
+apply.log
+license.key
+# Generated into customer repos only (release/customer.py sync)
+/boxd_installer/customer_defaults.toml
+
+# Your cluster's config and secrets stay local. Copy cluster.example.toml to
+# cluster.toml. (This repo's own demo cluster.toml and .env stay tracked.)
+/cluster.toml
+.env
+
+# customer copy: your cluster config and credentials stay local
+/cluster.toml
+.env
+# certificates and keys you hand to `providers set-tls-ca` / `set-github-key`
+/*.pem
+/*.key
+/secrets/

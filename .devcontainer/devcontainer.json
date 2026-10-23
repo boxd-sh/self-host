@@ -1,0 +1,19 @@
+{
+  // The installer's tools image (docker/), for VS Code / Codespaces. Same
+  // tools and pins as ./boxd-install; your gcloud and aws logins are shared.
+  "name": "boxd installer",
+  "build": { "dockerfile": "../docker/Dockerfile", "context": "../docker" },
+  "overrideCommand": true,
+  "initializeCommand": "mkdir -p ${localEnv:HOME}/.config/gcloud ${localEnv:HOME}/.aws",
+  "mounts": [
+    "source=${localEnv:HOME}/.config/gcloud,target=/home/installer/.config/gcloud,type=bind",
+    "source=${localEnv:HOME}/.aws,target=/home/installer/.aws,type=bind"
+  ],
+  "workspaceFolder": "/work",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/work,type=bind",
+  "remoteEnv": {
+    "BOXD_STATE_KEY": "${localEnv:BOXD_STATE_KEY}",
+    "BOXD_PRODUCT_LICENSE": "${localEnv:BOXD_PRODUCT_LICENSE}",
+    "AWS_PROFILE": "${localEnv:AWS_PROFILE}"
+  }
+}

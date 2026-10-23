@@ -1,0 +1,134 @@
+# Operator access to the control state (/var/lib/boxd/control/state.db) for
+# what boxd-ctl doesn't show; the intt self-hosted suites query it this way.
+# Ubuntu cloud images don't ship the CLI.
+- name: Install sqlite3
+  apt:
+    name: sqlite3
+    state: present
+
+# Local CA TLS mode ([acme].ca = "local"): boxd-control signs every cert with
+# the operator's intermediate CA. Only boxd-control may read the key —
+# proxy/console/dns run as the same boxd user, often on this node — so the
+# files are root:boxd-ca and only the control unit gets
+# SupplementaryGroups=boxd-ca (boxd.service.j2). Before the service install
+# so the group and files exist when it first starts.
+- name: Create boxd-ca group (local CA readers)
+  group:
+    name: boxd-ca
+    system: true
+  when: boxd_local_ca | default(false)
+
+- name: Create local CA dir
+  file:
+    path: /etc/boxd/ca
+    state: directory
+    owner: root
+    group: boxd-ca
+    mode: "0750"
+  when: boxd_local_ca | default(false)
+
+- name: Copy local CA cert + key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/{{ item }}"
+    dest: "/etc/boxd/ca/{{ item }}"
+    owner: root
+    group: boxd-ca
+    mode: "0640"
+  loop:
+    - local-ca.pem
+    - local-ca.key
+  notify: restart boxd service
+  when: boxd_local_ca | default(false)
+
+# Control state carried over from the instance this one replaces
+# (control_carry.py). Before the service install: boxd-control started on
+# an empty raft dir bootstraps a new, empty cluster. Never over a node's own
+# state.db — a rerun after a successful restore leaves it alone.
+- name: Look for carried control state
+  stat:
+    path: "{{ boxd_control_carry_dir }}/{{ inventory_hostname }}.tar.gz"
+  delegate_to: localhost
+  become: false
+  register: boxd_control_carry
+  when: boxd_control_carry_dir | default('') | length > 0
+
+- name: Check for existing control state
+  stat:
+    path: /var/lib/boxd/control/state.db
+  register: boxd_control_state
+  when: boxd_control_carry.stat.exists | default(false)
+
+- name: Restore carried control state
+  when:
+    - boxd_control_carry.stat.exists | default(false)
+    - not boxd_control_state.stat.exists
+  block:
+    - name: Create control state dir
+      file:
+        path: /var/lib/boxd/control
+        state: directory
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0755"
+
+    - name: Unpack carried control state
+      unarchive:
+        src: "{{ boxd_control_carry.stat.path }}"
+        dest: /var/lib/boxd/control
+
+    # uids differ between instances; the archive carries the old ones.
+    - name: Own carried control state
+      file:
+        path: /var/lib/boxd/control
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        recurse: true
+
+- name: Install boxd-control service
+  import_role:
+    name: boxd-common
+    tasks_from: install-service
+  vars:
+    boxd_binary: boxd-control
+    boxd_service: boxd-control
+    boxd_role_name: control
+
+- name: Copy boxd-ctl
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-ctl"
+    dest: /usr/local/bin/boxd-ctl
+    mode: preserve
+
+- name: Set boxd-ctl permissions
+  file:
+    path: /usr/local/bin/boxd-ctl
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Grant the operator account boxd-ctl access (boxd group)
+  user:
+    name: "{{ ansible_user }}"
+    groups: "{{ boxd_group }}"
+    append: true
+
+- name: Add ubuntu user to boxd group (for boxd-ctl socket access)
+  user:
+    name: ubuntu
+    groups: boxd
+    append: true
+
+# Pending restarts run first, so a fresh node starts boxd-control exactly once.
+# Without this the start below and the restart handler at the end of the play
+# ran ~1s apart, and the first process could spend Google Trust Services'
+# single-use EAB key registering an ACME account it never got to save
+# (our GCP end-to-end cluster, 2026-10-13: no certificates, ever).
+- name: Apply pending restarts before the first start
+  meta: flush_handlers
+
+- name: Enable and start boxd-control
+  systemd:
+    name: boxd-control
+    enabled: true
+    state: started
+    daemon_reload: true

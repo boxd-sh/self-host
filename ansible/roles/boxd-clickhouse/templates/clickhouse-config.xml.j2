@@ -1,0 +1,42 @@
+<clickhouse>
+    <listen_host replace="replace">{{ vrack_ip }}</listen_host>
+
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <interserver_http_port remove="true"/>
+    <interserver_https_port remove="true"/>
+
+    <!--
+        Upstream's max_server_memory_usage_ratio was a typo for this — older
+        ClickHouse silently ignored unknown config elements; 26.x refuses to
+        start on them. 0.5 because this co-locates with the boxd services.
+    -->
+    <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
+
+    <logger>
+        <level>information</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>100M</size>
+        <count>3</count>
+    </logger>
+
+    <!--
+        ClickHouse's built-in system.*_log tables default to UNBOUNDED growth
+        and will eventually fill the disk. Cap each log this deployment writes
+        with a TTL so old parts self-prune; product data (default.*) is
+        unaffected. trace_log/processors_profile_log are profiler debug output
+        nobody consumes — disabled outright.
+    -->
+    <query_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></query_log>
+    <trace_log remove="true"/>
+    <part_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></part_log>
+    <processors_profile_log remove="true"/>
+    <metric_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></metric_log>
+    <asynchronous_metric_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></asynchronous_metric_log>
+    <asynchronous_insert_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></asynchronous_insert_log>
+    <query_metric_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></query_metric_log>
+    <background_schedule_pool_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></background_schedule_pool_log>
+    <text_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></text_log>
+    <error_log><ttl>event_date + INTERVAL 7 DAY DELETE</ttl></error_log>
+</clickhouse>

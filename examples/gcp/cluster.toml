@@ -1,0 +1,188 @@
+# boxd self-host on Google Cloud — cluster.toml
+#
+# Copy this file to cluster.toml at the root of the installer and work
+# through it top to bottom:
+#
+#   1. YOUR CLUSTER   — values you must change (marked CHANGE)
+#   2. NODES          — the machines; the defaults are a small working cluster
+#   3. OPTIONAL       — your own CA, machine sizes, single sign-on
+#   4. LEAVE AS IS    — service settings; only change these if boxd asks you to
+#
+# Then check it, before anything touches Google Cloud:
+#
+#   ./boxd-install validate
+#
+# Secrets never go in this file (OAuth clients, API keys): see
+# README "Install on GCP" step 6 (`./boxd-install providers edit`).
+#
+# This example is one combined control node + one worker on Compute Engine,
+# in one subnet (vpc_cidr). The proxy/dns node gets a static external IP; the
+# rest egress via Cloud NAT. There is no public SSH: the installer reaches
+# nodes through IAP (you need roles/iap.tunnelResourceAccessor). GCP reserves
+# the first two and the last two addresses of the subnet.
+
+# ============================================================ 1. YOUR CLUSTER
+
+[cluster]
+# CHANGE. Lowercase letters, digits and dashes; prefixes every GCP resource.
+name = "boxd-gcp-demo"
+# CHANGE. The DNS zone the cluster serves, e.g. boxd.yourcompany.com. You
+# delegate it from its parent zone (NS + glue records) after the first apply.
+zone = "boxd.example.com"
+# The boxd release to install. "latest" follows the newest release boxd
+# publishes (resolved on every apply). To stay on one
+# release, put the 40-character version id the installer prints here.
+assets_version = "latest"
+# Optional. The name of the cluster's organization, the one everyone who
+# signs in joins. It's given when the first person signs in; rename it on
+# the console's Org page after that. Without it: "<First name>'s default org".
+# org_name = "Your Company"
+
+[gcp]
+project      = "my-gcp-project"          # CHANGE
+region       = "europe-west4"            # CHANGE if needed
+zone         = "europe-west4-a"          # CHANGE if needed
+# The subnet the installer creates. Pick a range that doesn't overlap
+# networks you'll peer with.
+vpc_cidr     = "10.60.0.0/16"
+image_family = "ubuntu-2404-lts-amd64"
+# CHANGE. Holds the terraform state and the encrypted installer state.
+# Create it once before the first apply, with versioning
+# (README "Install on GCP" step 4). One bucket per cluster.
+state_bucket = "boxd-gcp-demo-state"
+
+[acme]
+# CHANGE. Where the certificate authority (Google Trust Services) sends
+# expiry notices.
+contact_email = "ops@example.com"
+
+[license]
+# Optional. The file with your boxd license key, next to this one (it is
+# git-ignored). Without a key the cluster has the boxd free tier: up to 16
+# worker vCPUs. apply installs the key on every run. README "License key".
+# key_file = "license.key"
+
+[telemetry]
+# The cluster sends boxd one usage report an hour: counts only, no personal
+# data. See it with `boxd-ctl telemetry show`. Only a license key with
+# telemetry opt-out can turn it off (false, with [license] key_file); the free
+# tier always sends. Unset, apply leaves the cluster's setting as it is.
+# README "Telemetry".
+# enabled = false
+
+# ==================================================================== 2. NODES
+#
+# Roles: control (keeps cluster state; use 1 or 3), worker (runs the VMs),
+# proxy (public SSH/HTTPS entry), console (web UI), metrics (usage graphs),
+# dns:ns1 (authoritative DNS for your zone). Roles can share a node.
+#
+# CHANGE the node names: they become your instance names, so start them with
+# your cluster name (<name>-control-0, <name>-worker-0). `validate` warns if
+# they don't. Never rename a node after the first apply: that replaces it.
+#
+# One nameserver (dns:ns1) is the small setup. For redundancy give a second
+# node "dns:ns2"; apply then prints glue records for both.
+#
+# Workers need nested virtualization: Intel N2 (recommended) or N1. AMD
+# (N2D/C2D/T2D), Arm (T2A/C4A) and E2 machines will not boot VMs.
+
+[[nodes]]
+name        = "boxd-gcp-demo-control-0"
+roles       = ["control", "proxy", "console", "metrics", "dns:ns1"]
+internal_ip = "10.60.0.10"
+
+[[nodes]]
+name         = "boxd-gcp-demo-worker-0"
+roles        = ["worker"]
+internal_ip  = "10.60.0.20"
+machine_type = "n2-standard-16"          # default: n2-standard-16 without a license key, n2-standard-32 with one
+data_disk_gb = 500                       # required on workers: VM disks live here
+
+# ================================================================= 3. OPTIONAL
+#
+# Your own CA — inside a corporate network, sign certificates with your own
+# intermediate CA (README "TLS from your own CA"). Store it with
+# `./boxd-install providers set-tls-ca <cert.pem> <key.pem>`, then replace
+# contact_email under [acme] with:
+#   ca = "local"
+#   dns_verify_resolver = "10.0.0.2"     # your internal resolver
+# Or use ZeroSSL instead of Google Trust Services: ca = "zerossl".
+#
+# Under [gcp]: auto_backups = false turns off the backups bucket the
+# installer creates; interface = "ens4" sets the NIC name.
+
+# Machine sizes your users can pick. Without this table: 1 vCPU · 4 GiB,
+# 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are
+# removed on the next apply), so list every size you want. Memory-heavy sizes
+# need memory-optimised workers (n2-highmem-*).
+# [templates]
+# sizes = [
+#     { vcpu = 1, memory_gb = 4 },
+#     { vcpu = 2, memory_gb = 8 },
+#     { vcpu = 4, memory_gb = 16 },
+#     { vcpu = 1, memory_gb = 32 },
+# ]
+
+# Single sign-on through your company's OpenID Connect provider: Entra ID,
+# Okta, Google Workspace, Keycloak (README "Single sign-on"). It replaces
+# Google and GitHub sign-in. The client secret goes in the providers config
+# (`./boxd-install providers edit`), never here; `validate` fetches the
+# issuer's discovery document to check it.
+# [oidc]
+# issuer = "https://login.microsoftonline.com/<tenant-id>/v2.0"
+# client_id = "…"
+# display_name = "Contoso"                  # the button: "Sign in with Contoso"
+# bootstrap_admin = "you@yourcompany.com"   # the first sign-in; set before the first apply
+# link_email_domains = ["yourcompany.com"]  # existing accounts link by email
+# ca_cert = """
+# -----BEGIN CERTIFICATE-----
+# … the root of a provider behind a private CA (on-premises) …
+# -----END CERTIFICATE-----
+# """
+
+# ============================================================== 4. LEAVE AS IS
+
+[network]
+vni_range_start    = 100
+vni_range_end      = 10000
+bridge_subnet_base = "10.100.0.0"
+
+[control]
+socket_path = "/run/boxd/control.sock"
+default_auto_suspend_secs = 900          # idle VMs suspend after 15 min
+default_auto_hibernate_secs = 1800
+
+[worker]
+warm_slots = 2
+# true lets the VMs your users run start VMs of their own (KVM inside a boxd
+# VM). That is separate from the nested virtualization the installer turns on
+# for the worker instance itself, which is always on. Leave it off unless
+# users need it: it only performs well on *.metal workers, and it widens the
+# KVM attack surface for every VM on the host.
+nested_virt = false
+# TC filters on each VM's network interface. "full" (the default) compiles
+# per-VM eBPF programs with LLVM, which keeps VMs of different orgs apart on
+# the network but is slow on some CPUs. "anti-spoof" skips LLVM: VMs still
+# can't fake their MAC or IP, and only boxd itself can reach the in-VM agent
+# port (57073), but VMs reach each other on every other port, across orgs.
+# Use it only on single-tenant installs. A [[nodes]] entry can set it per
+# worker. Needs boxd assets that include it; older ones ignore the key.
+# tc_filters = "full"
+
+[proxy]
+ssh_port = 2222
+http_port = 80
+https_port = 443
+api_port = 9443
+host_key = "/etc/boxd/tls/proxy_host_ed25519"
+
+[dns]
+listen = "0.0.0.0:53"
+alias_zones = []
+
+[names]
+reserved = [
+    "api", "app", "www", "mail", "git", "ssh", "proxy", "ns1", "ns2",
+    "console", "connect", "docs", "help", "support", "status", "admin",
+    "grafana",
+]

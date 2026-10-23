@@ -1,0 +1,38 @@
+- hosts: all
+  become: true
+  roles:
+    - role: boxd-volume
+      when: "'worker' in group_names"
+    - boxd-common
+
+- hosts: metrics
+  become: true
+  roles:
+    - boxd-clickhouse
+
+- hosts: worker
+  become: true
+  roles:
+    - docker
+    - boxd-worker
+
+- hosts: proxy
+  become: true
+  roles:
+    - boxd-proxy
+
+- hosts: console
+  become: true
+  roles:
+    - boxd-console
+
+- hosts: dns
+  become: true
+  roles:
+    - boxd-dns
+
+- hosts: control
+  become: true
+  serial: 1
+  roles:
+    - boxd-control

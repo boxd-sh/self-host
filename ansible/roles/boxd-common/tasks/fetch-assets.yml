@@ -1,0 +1,58 @@
+# The node downloads the assets bundle from boxd's bucket itself (the URL
+# the installer used) and checks it against the manifest hashes the
+# installer verified. boxd_copy then copies from this copy, on the node,
+# instead of pushing every file through the operator's ssh tunnel (SSM on
+# AWS: ~0.26 MB/s). Once per assets version; a re-apply only stats it.
+# Any failure leaves boxd_assets_on_node false, and boxd_copy pushes over
+# ssh as before.
+- name: Fetch the assets bundle on the node
+  block:
+    - name: Check for this assets version on the node
+      stat:
+        path: "{{ boxd_node_assets_root }}/{{ boxd_assets_sha }}/.verified"
+      register: node_assets
+
+    - name: Download, unpack and verify the assets bundle
+      when: not node_assets.stat.exists
+      block:
+        - name: Ensure the node assets directory
+          file:
+            path: "{{ boxd_node_assets_root }}"
+            state: directory
+            mode: "0700"
+
+        - name: Write the expected assets hashes
+          copy:
+            content: "{{ boxd_asset_hashes | to_json }}"
+            dest: "{{ boxd_node_assets_root }}/{{ boxd_assets_sha }}.hashes.json"
+            mode: "0600"
+
+        # no_log: the URL carries the license.
+        - name: Download the assets bundle
+          get_url:
+            url: "{{ boxd_assets_url }}"
+            dest: "{{ boxd_node_assets_root }}/{{ boxd_assets_sha }}.zip"
+            mode: "0600"
+            timeout: 60
+          no_log: true
+
+        - name: Unpack and verify the assets bundle
+          script: boxd-assets-unpack.py {{ boxd_node_assets_root }} {{ boxd_assets_sha }}
+          args:
+            executable: python3
+
+    - name: Use the node's copy of the assets
+      set_fact:
+        boxd_assets_on_node: true
+  rescue:
+    - name: Fall back to copying assets over ssh
+      # A no_log task's result is censored, so its msg/stderr come out empty.
+      debug:
+        msg: >-
+          warning: "{{ ansible_failed_task.name }}" failed, so assets go over ssh
+          (slower). {{ ansible_failed_result.msg | default('') }}
+          {{ ansible_failed_result.stderr | default('') }}
+
+    - name: Copy assets over ssh
+      set_fact:
+        boxd_assets_on_node: false

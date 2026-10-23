@@ -1,0 +1,15 @@
+- name: reload systemd
+  systemd:
+    daemon_reload: true
+
+- name: restart boxd service
+  systemd:
+    name: boxd-proxy
+    state: restarted
+
+- name: restart boxd-console
+  systemd:
+    name: boxd-console
+    state: restarted
+  when: boxd_console_unit.stat.exists | default(false)
+

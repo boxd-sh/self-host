@@ -1,0 +1,61 @@
+{
+  "version": 4,
+  "terraform_version": "1.9.8",
+  "serial": 42,
+  "lineage": "00000000-0000-0000-0000-000000000000",
+  "outputs": {},
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "node",
+      "provider": "provider[\"registry.terraform.io/hashicorp/aws\"]",
+      "instances": [
+        {
+          "index_key": "boxd-aws-demo-control-0",
+          "schema_version": 1,
+          "attributes": {"id": "i-0aaa", "instance_type": "m7i.2xlarge"}
+        },
+        {
+          "index_key": "boxd-aws-demo-worker-0",
+          "schema_version": 1,
+          "attributes": {"id": "i-0bbb", "instance_type": "m8i.8xlarge"}
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "google_compute_instance",
+      "name": "node",
+      "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+      "instances": [
+        {
+          "index_key": "gcp-worker-0",
+          "schema_version": 6,
+          "attributes": {"machine_type": "n2-standard-32"}
+        },
+        {
+          "index_key": "gcp-worker-1",
+          "schema_version": 6,
+          "attributes": {"machine_type": "https://www.googleapis.com/compute/v1/projects/p/zones/europe-west1-b/machineTypes/n2-standard-16"}
+        }
+      ]
+    },
+    {
+      "mode": "data",
+      "type": "aws_instance",
+      "name": "node",
+      "instances": [
+        {"index_key": "boxd-aws-demo-worker-0", "attributes": {"instance_type": "c7i.large"}}
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_ebs_volume",
+      "name": "data",
+      "instances": [
+        {"index_key": "boxd-aws-demo-worker-0", "attributes": {"type": "gp3"}}
+      ]
+    }
+  ]
+}

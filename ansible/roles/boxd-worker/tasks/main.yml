@@ -1,0 +1,604 @@
+- name: Locate host kernel deb in assets
+  set_fact:
+    host_kernel_deb: "{{ lookup('fileglob', boxd_assets_dir + '/kernel/linux-image-*.deb') }}"
+
+- name: Warn when assets ship no host kernel
+  debug:
+    msg: >-
+      assets zip has no kernel/linux-image-*.deb — worker stays on
+      {{ ansible_kernel }}; live VM fork (import_cow_range) will not work.
+  when: host_kernel_deb == "" and "boxd" not in ansible_kernel
+
+# GRUB_DEFAULT=0 boots the highest-versioned kernel, so the pin must name the
+# boxd kernel explicitly: Canonical's 24.04 AWS image ships 7.x, which outranks
+# 6.17-boxd and silently wins the reboot. Applied even when the boxd kernel is
+# already running, so a later stock-kernel upgrade can't take over the next boot.
+- name: Pin grub default to the host kernel
+  copy:
+    dest: /etc/default/grub.d/99-boxd-host-kernel.cfg
+    content: |
+      GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux {{ boxd_host_kernel_release }}"
+    mode: "0644"
+  register: host_kernel_grub_pin
+  when:
+    - host_kernel_deb != ""
+    - boxd_host_kernel_release | default("") != ""
+
+- name: Update grub for the kernel pin
+  command: update-grub
+  when:
+    - host_kernel_grub_pin is changed
+    - ansible_kernel == boxd_host_kernel_release
+
+- name: Install patched host kernel
+  when:
+    - host_kernel_deb != ""
+    - boxd_host_kernel_release | default("") != ""
+    - ansible_kernel != boxd_host_kernel_release
+  block:
+    - name: Copy host kernel deb
+      boxd_copy:
+        src: "{{ host_kernel_deb }}"
+        dest: "/tmp/{{ host_kernel_deb | basename }}"
+
+    - name: Install host kernel package
+      apt:
+        deb: "/tmp/{{ host_kernel_deb | basename }}"
+
+    - name: Update grub
+      command: update-grub
+      changed_when: true
+
+    - name: Reboot into the patched kernel
+      reboot:
+        reboot_timeout: 600
+
+    - name: Verify the pinned kernel is running
+      command: uname -r
+      register: post_reboot_kernel
+      changed_when: false
+      failed_when: post_reboot_kernel.stdout != boxd_host_kernel_release
+
+- name: Install boxd-worker service
+  import_role:
+    name: boxd-common
+    tasks_from: install-service
+  vars:
+    boxd_binary: boxd-worker
+    boxd_service: boxd-worker
+    boxd_role_name: worker
+
+- name: Install worker dependencies
+  apt:
+    name:
+      - fakeroot
+      - e2fsprogs
+    state: present
+
+- name: Enable IP forwarding
+  sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+
+- name: Worker memory tuning sysctls
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/99-boxd-worker.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: vm.swappiness, value: "100" }
+    - { name: vm.overcommit_memory, value: "1" }
+    - { name: vm.unprivileged_userfaultfd, value: "1" }
+
+- name: Enable transparent hugepages + shmem THP + mTHP sizes
+  copy:
+    dest: /etc/tmpfiles.d/boxd-thp.conf
+    content: |
+      w /sys/kernel/mm/transparent_hugepage/enabled - - - - always
+      w /sys/kernel/mm/transparent_hugepage/defrag - - - - always
+      w /sys/kernel/mm/transparent_hugepage/shmem_enabled - - - - advise
+      w /sys/kernel/mm/transparent_hugepage/hugepages-16kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-32kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-128kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-256kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-512kB/enabled - - - - inherit
+      w /sys/kernel/mm/transparent_hugepage/hugepages-1024kB/enabled - - - - inherit
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply THP tmpfiles immediately
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/boxd-thp.conf
+  changed_when: false
+
+- name: Loosen perms on /dev/userfaultfd so boxd-vmm can open it
+  copy:
+    dest: /etc/tmpfiles.d/boxd-userfaultfd.conf
+    content: |
+      z /dev/userfaultfd 0666 - - -
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Apply userfaultfd tmpfiles immediately
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/boxd-userfaultfd.conf
+  changed_when: false
+
+- name: Check which swap files already exist
+  stat:
+    path: "{{ item.path }}"
+    get_checksum: false
+    get_attributes: false
+    get_mime: false
+  loop: "{{ boxd_worker_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: swapfile_stat
+  check_mode: false
+  tags: [swap]
+
+- name: Allocate new swap files
+  command: fallocate -l {{ item.item.size }} {{ item.item.path }}
+  loop: "{{ swapfile_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: not item.stat.exists
+  tags: [swap]
+
+- name: Set swap file permissions
+  file:
+    path: "{{ item.item.path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop: "{{ swapfile_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: item.stat.exists or not ansible_check_mode
+  tags: [swap]
+
+- name: mkswap on new swap files
+  command: mkswap {{ item.item.path }}
+  loop: "{{ swapfile_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when: not item.stat.exists
+  tags: [swap]
+
+- name: List active swap devices
+  command: swapon --show=NAME --noheadings
+  register: active_swaps
+  changed_when: false
+  check_mode: false
+  tags: [swap]
+
+- name: Activate swap files that are not active yet
+  command: "swapon {{ ('-p ' ~ item.priority ~ ' ') if item.priority is defined else '' }}{{ item.path }}"
+  loop: "{{ boxd_worker_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: item.path not in active_swaps.stdout_lines
+  tags: [swap]
+
+- name: Persist swap files in /etc/fstab
+  lineinfile:
+    path: /etc/fstab
+    line: "{{ item.path }} none swap sw{{ (',pri=' ~ item.priority) if item.priority is defined else '' }} 0 0"
+    regexp: '^{{ item.path | regex_escape }}\s'
+    state: present
+  loop: "{{ boxd_worker_swapfiles }}"
+  loop_control:
+    label: "{{ item.path }}"
+  tags: [swap]
+
+- name: Create boxd-br0 bridge
+  command: ip link add boxd-br0 type bridge
+  register: bridge_create
+  failed_when: bridge_create.rc != 0 and 'File exists' not in bridge_create.stderr
+  changed_when: bridge_create.rc == 0
+
+- name: Assign IP to boxd-br0
+  command: "ip addr add {{ bridge_gateway }}/16 dev boxd-br0"
+  register: bridge_ip
+  failed_when: bridge_ip.rc != 0 and 'File exists' not in bridge_ip.stderr and 'already assigned' not in bridge_ip.stderr
+  changed_when: bridge_ip.rc == 0
+
+- name: Bring up boxd-br0
+  command: ip link set boxd-br0 up
+  changed_when: false
+
+- name: Remove stale MASQUERADE rules for prior bridge_subnets
+  shell: |
+    set -e
+    expected="{{ bridge_subnet }}"
+    iptables -t nat -S POSTROUTING | while IFS= read -r line; do
+      case "$line" in
+        *"-j MASQUERADE"*)
+          case "$line" in
+            *"! -o boxd-br0"*)
+              src=$(printf '%s\n' "$line" | sed -n 's/.*-s \([0-9./]\+\).*/\1/p')
+              if [ -n "$src" ] && [ "$src" != "$expected" ]; then
+                del=$(printf '%s\n' "$line" | sed 's/^-A /-D /')
+                echo "removing stale: $del"
+                iptables -t nat $del
+              fi
+              ;;
+          esac
+          ;;
+      esac
+    done
+  register: stale_masq
+  changed_when: "'removing stale' in stale_masq.stdout"
+
+- name: NAT for VM outbound traffic
+  iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ bridge_subnet }}"
+    out_interface: "!boxd-br0"
+    jump: MASQUERADE
+    state: present
+
+- name: Block VM access to cloud metadata service
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    destination: 169.254.169.254
+    jump: DROP
+    state: present
+
+- name: Allow forwarding from bridge
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding to bridge from vRack
+  iptables:
+    chain: FORWARD
+    in_interface: "{{ vrack_interface }}"
+    out_interface: boxd-br0
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding to bridge (established)
+  iptables:
+    chain: FORWARD
+    out_interface: boxd-br0
+    ctstate: RELATED,ESTABLISHED
+    jump: ACCEPT
+    state: present
+
+- name: Block VM-to-VM traffic to exec server (port 9000)
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    out_interface: boxd-br0
+    protocol: tcp
+    destination_port: "9000"
+    jump: DROP
+    state: present
+
+- name: Find this worker's VXLAN config
+  set_fact:
+    my_worker: "{{ boxd_workers | selectattr('name', 'equalto', inventory_hostname) | first }}"
+
+- name: Create VXLAN interface for VM overlay
+  command: "ip link add vxlan{{ my_worker.vni }} type vxlan id {{ my_worker.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
+  register: vxlan_create
+  failed_when: vxlan_create.rc != 0 and 'File exists' not in vxlan_create.stderr
+  changed_when: vxlan_create.rc == 0
+
+- name: Add FDB entries for proxy nodes
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ hostvars[item].vrack_ip }}"
+  loop: "{{ groups['proxy'] }}"
+  changed_when: false
+  failed_when: false
+
+- name: Add FDB entries for peer workers (enables cross-worker ARP replies)
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ item.vrack_ip }} self permanent"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+# `ip link set ... master` exits 0 for a device already on that bridge, so the
+# change is read off the device's current master instead (as boxd's role,
+# BOX-631).
+- name: Attach VXLAN to bridge
+  shell: |
+    set -e
+    if ! ip -o link show vxlan{{ my_worker.vni }} | grep -q ' master boxd-br0 '; then
+      ip link set vxlan{{ my_worker.vni }} master boxd-br0
+      echo CHANGED
+    fi
+  register: vxlan_bridge
+  changed_when: "'CHANGED' in vxlan_bridge.stdout"
+
+- name: Bring up VXLAN interface
+  command: "ip link set vxlan{{ my_worker.vni }} up"
+  changed_when: false
+
+- name: Create VXLAN tunnels to peer workers
+  command: "ip link add vxlan{{ item.vni }} type vxlan id {{ item.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  register: peer_vxlan
+  failed_when: peer_vxlan.rc != 0 and 'File exists' not in peer_vxlan.stderr
+  changed_when: peer_vxlan.rc == 0
+
+- name: Add FDB entries for peer workers
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ item.vni }} dst {{ item.vrack_ip }} self permanent"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Compute this worker's peer IP suffix (250 - index)
+  set_fact:
+    my_worker_peer_suffix: "{{ 250 - (boxd_workers | map(attribute='name') | list).index(inventory_hostname) }}"
+
+- name: Add IP to peer VXLAN interfaces (needed for ARP, unique per worker)
+  command: "ip addr replace {{ item.bridge_subnet | regex_replace('0\\.0/16$', '0.' ~ my_worker_peer_suffix ~ '/16') }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Bring up peer VXLAN interfaces
+  command: "ip link set vxlan{{ item.vni }} up"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+
+- name: Add routes to peer worker bridge subnets
+  command: "ip route replace {{ item.bridge_subnet }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Install VXLAN startup script
+  template:
+    src: boxd-vxlan.sh.j2
+    dest: /usr/local/bin/boxd-vxlan.sh
+    mode: "0755"
+
+- name: Install VXLAN systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd VXLAN overlay
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/boxd-vxlan.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-vxlan.service
+    mode: "0644"
+
+- name: Enable VXLAN service
+  systemd:
+    name: boxd-vxlan
+    enabled: true
+    daemon_reload: true
+
+- name: Install per-VM DNS egress rate-limit script (anti-flood)
+  template:
+    src: boxd-dns-ratelimit.sh.j2
+    dest: /usr/local/bin/boxd-dns-ratelimit.sh
+    mode: "0755"
+  notify: reapply dns ratelimit
+
+- name: Install DNS rate-limit systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd per-VM DNS egress rate limit (anti-flood)
+      After=network-online.target boxd-vxlan.service
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/boxd-dns-ratelimit.sh
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-dns-ratelimit.service
+    mode: "0644"
+  notify: reapply dns ratelimit
+
+- name: Enable + start DNS rate-limit service
+  systemd:
+    name: boxd-dns-ratelimit
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Persist bridge config via netplan
+  template:
+    src: 60-boxd-bridge.yaml.j2
+    dest: /etc/netplan/60-boxd-bridge.yaml
+    mode: "0600"
+
+- name: Persist iptables rules
+  apt:
+    name: iptables-persistent
+    state: present
+
+- name: Save iptables rules
+  command: netfilter-persistent save
+  changed_when: false
+
+- name: Ensure /dev/kvm exists
+  stat:
+    path: /dev/kvm
+  register: kvm_device
+
+- name: Fail if /dev/kvm not available
+  fail:
+    msg: "/dev/kvm not found — KVM support required for workers"
+  when: not kvm_device.stat.exists
+
+- name: Copy kernel
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/vmlinux"
+    dest: "{{ boxd_data_dir }}/vmlinux"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Copy initrd
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/initrd.img"
+    dest: "{{ boxd_data_dir }}/initrd.img"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Copy boxd-vmm
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-vmm"
+    dest: "/usr/local/bin/boxd-vmm"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Set boxd-vmm permissions
+  file:
+    path: /usr/local/bin/boxd-vmm
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Set CAP_SYS_ADMIN + CAP_SYS_PTRACE on boxd-vmm
+  command: setcap "cap_sys_admin,cap_sys_ptrace+ep" /usr/local/bin/boxd-vmm
+  changed_when: false
+
+- name: Copy boxd-vmm-pool
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-vmm-pool"
+    dest: /usr/local/bin/boxd-vmm-pool
+    mode: preserve
+  notify: restart boxd service
+
+- name: Set boxd-vmm-pool permissions
+  file:
+    path: /usr/local/bin/boxd-vmm-pool
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Copy boxd-vmexec
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-vmexec"
+    dest: /usr/local/bin/boxd-vmexec
+    mode: preserve
+
+- name: Set boxd-vmexec permissions
+  file:
+    path: /usr/local/bin/boxd-vmexec
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Copy boxd-takeoff
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-takeoff"
+    dest: "{{ boxd_data_dir }}/boxd-takeoff"
+    mode: preserve
+
+- name: Ensure SDK directory exists
+  file:
+    path: "{{ boxd_data_dir }}/sdk"
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+
+- name: Copy boxd-sdk (in-VM CLI)
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-sdk"
+    dest: "{{ boxd_data_dir }}/sdk/boxd"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Copy boxd-automations (in-VM automations supervisor)
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-automations"
+    dest: "{{ boxd_data_dir }}/sdk/boxd-automations"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Copy run (in-VM automations CLI)
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-run"
+    dest: "{{ boxd_data_dir }}/sdk/run"
+    mode: preserve
+  notify: restart boxd service
+
+- name: Ship the automations toolkit registry
+  # The per-toolkit artifact the worker selects each org's bundle out of.
+  # Without it a worker with [automations] configured logs "configured but no
+  # registry artifact", every `run` call 503s, and `run list` in a VM is empty.
+  boxd_copy:
+    src: "{{ boxd_assets_dir }}/automations/automations-registry.tar.gz"
+    dest: "{{ boxd_data_dir }}/automations-registry.tar.gz"
+    mode: "0644"
+  register: boxd_automations_registry
+
+- name: Unpack the automations toolkit registry
+  # /var/lib/boxd/automations/registry is COMPILED INTO the worker
+  # (boxd-worker automations::REGISTRY_ROOT), so it is boxd_state_dir here and
+  # not the worker's data dir. Staging dir + per-version swap mirrors
+  # scripts/deploy/worker.sh: a worker reading a bundle mid-converge must never
+  # see a half-written tree, and older versions stay in place because bundles
+  # already installed in running VMs reference them by version.
+  shell: |
+    set -e
+    incoming={{ boxd_state_dir }}/automations/.registry-incoming
+    rm -rf "$incoming"
+    mkdir -p "$incoming" {{ boxd_state_dir }}/automations/registry
+    tar -xzf {{ boxd_data_dir }}/automations-registry.tar.gz -C "$incoming"
+    for v in "$incoming"/*; do
+      rm -rf "{{ boxd_state_dir }}/automations/registry/$(basename "$v")"
+      mv "$v" {{ boxd_state_dir }}/automations/registry/
+    done
+    rm -rf "$incoming"
+  when: boxd_automations_registry.changed
+  notify: restart boxd service
+
+- name: Copy xclip shim (clipboard bridge for VMs)
+  copy:
+    src: xclip-shim.sh  # vendored in this role's files/
+    dest: "{{ boxd_data_dir }}/sdk/xclip-shim"
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  notify: restart boxd service
+
+- name: Ensure /etc/boxd/tls exists
+  file:
+    path: /etc/boxd/tls
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0750"
+
+- name: Copy GitHub App private key
+  copy:
+    src: "{{ boxd_tls_local_dir }}/{{ boxd_github_app_key }}"
+    dest: /etc/boxd/tls/github-app.pem
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  notify: restart boxd service
+  when: boxd_github_app_key is defined
+
+- name: Enable and start boxd-worker
+  systemd:
+    name: boxd-worker
+    enabled: true
+    state: started
+    daemon_reload: true

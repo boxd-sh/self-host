@@ -1,0 +1,3 @@
+boxd_binary: boxd-dns
+boxd_service: boxd-dns
+boxd_role_name: dns

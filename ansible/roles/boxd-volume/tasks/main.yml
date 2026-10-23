@@ -1,0 +1,80 @@
+- name: Install xfsprogs
+  apt:
+    name: xfsprogs
+    state: present
+
+- name: Create mount point (unmanaged volume)
+  file:
+    path: "{{ boxd_volume_mount }}"
+    state: directory
+    mode: "0755"
+  when: not (boxd_volume_manage | default(true) | bool)
+
+- name: Volume tasks
+  when: boxd_volume_manage | default(true) | bool
+  block:
+    - name: Detect attached block volume device
+      shell: |
+        for dev in $(lsblk -dpno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+          if ! lsblk -no MOUNTPOINT "$dev" 2>/dev/null | grep -q '^/$'; then
+            echo "$dev"
+            break
+          fi
+        done
+      register: volume_device_detect
+      changed_when: false
+      when: boxd_volume_device is not defined
+
+    - name: Set volume device fact
+      set_fact:
+        detected_volume_device: "{{ boxd_volume_device | default(volume_device_detect.stdout | trim) }}"
+
+    - name: Fail if no volume device detected
+      fail:
+        msg: "No attached block volume detected. Expected a second disk device."
+      when: detected_volume_device == ""
+
+    - name: Refuse to format the root device
+      shell: |
+        if lsblk -no MOUNTPOINT {{ detected_volume_device }} | grep -q '^/$'; then
+          echo "REFUSING: {{ detected_volume_device }} backs the root filesystem"
+          exit 1
+        fi
+        exit 0
+      changed_when: false
+
+    - name: Check if volume is already formatted
+      command: "blkid -o value -s TYPE {{ detected_volume_device }}"
+      register: volume_fstype
+      changed_when: false
+      failed_when: false
+
+    - name: Format volume as XFS
+      command: "mkfs.xfs {{ boxd_volume_mkfs_opts | default('') }} {{ detected_volume_device }}"
+      when: volume_fstype.stdout | trim != "xfs"
+
+    - name: Create mount point
+      file:
+        path: "{{ boxd_volume_mount }}"
+        state: directory
+        mode: "0755"
+
+    - name: Get volume UUID
+      command: "blkid -o value -s UUID {{ detected_volume_device }}"
+      register: volume_uuid
+      changed_when: false
+
+    - name: Mount volume and add to fstab
+      mount:
+        path: "{{ boxd_volume_mount }}"
+        src: "UUID={{ volume_uuid.stdout | trim }}"
+        fstype: xfs
+        opts: "noatime,nodiratime,discard"
+        state: mounted
+
+    - name: Enable weekly fstrim
+      systemd:
+        name: fstrim.timer
+        enabled: true
+        state: started
+      failed_when: false

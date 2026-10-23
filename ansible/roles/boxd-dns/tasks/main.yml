@@ -1,0 +1,30 @@
+- name: Install boxd-dns service
+  import_role:
+    name: boxd-common
+    tasks_from: install-service
+  vars:
+    boxd_binary: boxd-dns
+    boxd_service: boxd-dns
+    boxd_role_name: dns
+
+- name: Create resolved.conf.d directory
+  file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+
+- name: Disable systemd-resolved stub listener
+  copy:
+    content: |
+      [Resolve]
+      DNSStubListener=no
+    dest: /etc/systemd/resolved.conf.d/no-stub.conf
+    mode: "0644"
+  notify: restart systemd-resolved
+
+- name: Enable and start boxd-dns
+  systemd:
+    name: boxd-dns
+    enabled: true
+    state: started
+    daemon_reload: true

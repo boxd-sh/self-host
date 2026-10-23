@@ -1,0 +1,13 @@
+- name: reload systemd
+  systemd:
+    daemon_reload: true
+
+- name: restart boxd service
+  systemd:
+    name: boxd-dns
+    state: restarted
+
+- name: restart systemd-resolved
+  systemd:
+    name: systemd-resolved
+    state: restarted

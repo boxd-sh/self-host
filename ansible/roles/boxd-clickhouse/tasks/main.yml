@@ -1,0 +1,129 @@
+---
+
+- name: Add ClickHouse GPG key
+  apt_key:
+    url: https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key
+    keyring: /usr/share/keyrings/clickhouse-keyring.gpg
+    state: present
+
+- name: Add ClickHouse apt repository
+  apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main"
+    filename: clickhouse
+    state: present
+
+- name: Install ClickHouse
+  apt:
+    name:
+      - clickhouse-server
+      - clickhouse-client
+    state: present
+    update_cache: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+
+- name: Deploy ClickHouse server config
+  template:
+    src: clickhouse-config.xml.j2
+    dest: /etc/clickhouse-server/config.d/boxd.xml
+    owner: clickhouse
+    group: clickhouse
+    mode: "0644"
+  notify: restart clickhouse
+
+- name: Deploy ClickHouse users config
+  template:
+    src: clickhouse-users.xml.j2
+    dest: /etc/clickhouse-server/users.d/boxd-users.xml
+    owner: clickhouse
+    group: clickhouse
+    mode: "0640"
+  notify: restart clickhouse
+
+- name: Ensure ClickHouse data directory
+  file:
+    path: /var/lib/clickhouse
+    state: directory
+    owner: clickhouse
+    group: clickhouse
+    mode: "0750"
+
+- name: Enable and start ClickHouse
+  systemd:
+    name: clickhouse-server
+    enabled: true
+    state: started
+
+- name: Wait for ClickHouse to be ready
+  wait_for:
+    port: 8123
+    host: "{{ vrack_ip }}"
+    delay: 2
+    timeout: 30
+
+# The migrations are staged in a scratch directory that "Clean up migrations"
+# removes again, so the host ends the run as it started: neither task changes
+# anything, and neither reports it. Applying them is idempotent and reports
+# nothing either (as boxd's role, BOX-631).
+- name: Copy schema migrations
+  copy:
+    src: "migrations/"
+    dest: /tmp/clickhouse-migrations/
+    mode: "0644"
+  changed_when: false
+
+- name: Apply schema migrations
+  shell: |
+    for f in /tmp/clickhouse-migrations/*.sql; do
+      clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' --multiquery < "$f"
+    done
+  changed_when: false
+
+- name: Clean up migrations
+  file:
+    path: /tmp/clickhouse-migrations
+    state: absent
+  changed_when: false
+
+# System-log TTL reconcile: ClickHouse never retrofits a config TTL onto an
+# existing system.*_log table — on restart it renames the mismatched table to
+# <name>_<N> and starts fresh, and the orphan keeps its data forever.
+- name: Apply any pending restart so system.*_log tables recreate with their TTL
+  meta: flush_handlers
+
+- name: Wait for ClickHouse native port after (possible) restart
+  wait_for:
+    port: 9000
+    host: "{{ vrack_ip }}"
+    delay: 1
+    timeout: 30
+
+- name: Force system log tables to recreate with the configured TTL
+  shell: clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' -q "SYSTEM FLUSH LOGS"
+  changed_when: false
+
+- name: Drop orphaned system.*_log_<N> tables left by the TTL recreate
+  shell: |
+    set -e
+    orphans=$(clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' \
+      -q "SELECT name FROM system.tables WHERE database='system' AND match(name, '_log_[0-9]+$')")
+    for o in $orphans; do
+      clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' \
+        -q "DROP TABLE IF EXISTS system.$o SYNC"
+    done
+    if [ -n "$orphans" ]; then echo CHANGED; fi
+  register: ch_log_orphan_sweep
+  changed_when: "'CHANGED' in ch_log_orphan_sweep.stdout"
+
+- name: Drop disabled system log tables to reclaim their disk bytes
+  shell: |
+    set -e
+    existed=$(clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' \
+      -q "SELECT name FROM system.tables WHERE database='system' AND name IN ('trace_log','processors_profile_log')")
+    for t in $existed; do
+      clickhouse-client --host {{ vrack_ip }} --password '{{ clickhouse_password }}' \
+        -q "DROP TABLE IF EXISTS system.$t SYNC"
+    done
+    if [ -n "$existed" ]; then echo CHANGED; fi
+  register: ch_disabled_log_sweep
+  changed_when: "'CHANGED' in ch_disabled_log_sweep.stdout"

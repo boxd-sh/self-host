@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Run the boxd installer with every tool it needs, from a Docker image — so
+# the only thing to install is Docker.
+#
+#   ./boxd-install validate | apply | providers edit | …   ./install.py <args>
+#   ./boxd-install gcloud auth login --no-launch-browser     a tool in the image
+#   ./boxd-install aws sso login --use-device-code
+#   ./boxd-install shell                                     a shell in the image
+#
+# Your gcloud and aws logins live in ~/.config/gcloud and ~/.aws (shared with
+# any host install); gcloud's ssh key in ~/.config/boxd-install/ssh. BOXD_STATE_KEY, BOXD_PRODUCT_LICENSE and AWS_* pass
+# through from your environment by name; their values never reach a command
+# line. So does BOXD_RELEASES_URL (a copy of boxd's release bucket, for
+# tests); a file:// one is mounted read-only at the same path. The image is ghcr.io/azin-tech/boxd-installer-tools:<docker/VERSION>;
+# if it can't be pulled it is built locally from docker/Dockerfile.
+# BOXD_INSTALLER_IMAGE overrides it.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+IMAGE="${BOXD_INSTALLER_IMAGE:-ghcr.io/azin-tech/boxd-installer-tools:$(cat docker/VERSION)}"
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1 && ! err=$(docker pull -q "$IMAGE" 2>&1); then
+    echo "boxd-install: can't pull $IMAGE — not published, not public, or no network (${err##*$'\n'})" >&2
+    echo "boxd-install: building it locally instead — once, a few minutes, ~1.8 GB" >&2
+    docker build -t "$IMAGE" docker >&2
+fi
+
+mkdir -p "$HOME/.config/gcloud" "$HOME/.aws"
+# The container's own ~/.ssh: gcloud compute ssh keeps its key there. Without
+# it every run minted a new key and added it to the project's ssh metadata.
+SSH_DIR="$HOME/.config/boxd-install/ssh"
+mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
+# The editor for `providers edit` must exist in the image.
+case "${EDITOR:-}" in vi|vim|nano) ;; *) EDITOR=nano ;; esac
+
+args=(--rm -i --user "$(id -u):$(id -g)"
+      -v "$PWD:/work" -w /work
+      -v "$HOME/.config/gcloud:/home/installer/.config/gcloud"
+      -v "$HOME/.aws:/home/installer/.aws"
+      -v "$SSH_DIR:/home/installer/.ssh"
+      -e EDITOR="$EDITOR")
+[ -t 0 ] && [ -t 1 ] && args+=(-t)
+for v in BOXD_STATE_KEY BOXD_PRODUCT_LICENSE BOXD_RELEASES_URL \
+         AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION \
+         AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+         CLOUDSDK_CORE_PROJECT; do
+    [ -n "${!v:-}" ] && args+=(-e "$v")
+done
+case "${BOXD_RELEASES_URL:-}" in
+    file:///*) d="${BOXD_RELEASES_URL#file://}"
+               [ -d "$d" ] || { echo "boxd-install: BOXD_RELEASES_URL: no directory $d" >&2; exit 1; }
+               args+=(-v "$d:$d:ro") ;;
+esac
+
+case "${1:-}" in
+    gcloud|aws|terraform|ansible|ansible-playbook|ssh) exec docker run "${args[@]}" "$IMAGE" "$@" ;;
+    shell) shift; exec docker run "${args[@]}" "$IMAGE" bash "$@" ;;
+    *) exec docker run "${args[@]}" "$IMAGE" ./install.py "$@" ;;
+esac

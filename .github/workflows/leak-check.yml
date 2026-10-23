@@ -1,0 +1,82 @@
+# gitleaks on every push and pull request, in the repos generated from this
+# one (azin-tech/boxd-self-host and the customer repos; release/ship.txt
+# ships this file). Not in boxd-installer itself: its tree and history hold
+# the demo cluster's .env and cluster.toml on purpose. The generator runs the
+# same scan, and the licensee-name check, before every push (release/customer.py).
+#
+# It scans the tree, and only the commits this push or pull request adds:
+# older history is not rescanned (customer repos have old releases with a
+# known false positive that no new commit can change). A force push scans
+# BEFORE..SHA: the commits SHA has and the old head had not; if the old
+# head can't be fetched, the job fails.
+name: leak-check
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  gitleaks:
+    if: github.repository != 'azin-tech/boxd-installer'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: install gitleaks (sha256-pinned)
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
+      - name: scan the tree
+        run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
+      - name: scan the new commits
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          default="refs/remotes/origin/$DEFAULT_BRANCH"
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "$zero" ]; then
+            # An update, also a force push: BEFORE..SHA is what SHA has and
+            # BEFORE had not, ancestor or not. The old head of a force push is
+            # no longer on a branch, so the checkout may not have it: fetch it,
+            # with the job token (the checkout keeps no credentials). If that
+            # fails, fail: never scan less than the pushed commits in silence.
+            if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+              echo "::add-mask::$auth"
+              git -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --no-tags origin "$BEFORE" \
+                || echo "::warning::git fetch of the old head $BEFORE failed"
+            fi
+            if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              echo "::error::The old head $BEFORE of this push can't be fetched, so the pushed commits can't be told apart from older history. Not scanning less than them: re-run, or scan by hand with gitleaks git --log-opts=<range>."
+              exit 1
+            fi
+            range="$BEFORE..$SHA"
+          elif git rev-parse -q --verify "$default" >/dev/null \
+               && [ "$(git rev-parse "$default")" != "$SHA" ]; then
+            range="$default..$SHA"                       # a new branch
+          elif git rev-parse -q --verify "$SHA^" >/dev/null; then
+            range="$SHA^!"                               # a new default branch: its head
+          else
+            range="$SHA"                                 # the repo's first commit
+          fi
+          echo "commits: $range"
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --log-opts="$range"

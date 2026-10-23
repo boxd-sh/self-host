@@ -1,0 +1,9 @@
+boxd_binary: boxd-proxy
+boxd_service: boxd-proxy
+boxd_role_name: proxy
+
+proxy_ssh_port: 2222
+
+ssh_port_range_start: 10000
+ssh_port_range_end: 30000
+

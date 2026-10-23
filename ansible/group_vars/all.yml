@@ -1,0 +1,16 @@
+boxd_user: boxd
+boxd_group: boxd
+boxd_user_system: true
+boxd_user_shell: /usr/sbin/nologin
+boxd_user_create_home: false
+
+boxd_config_dir: /etc/boxd
+boxd_data_dir: /var/lib/boxd
+boxd_run_dir: /run/boxd
+boxd_log_dir: /var/log/boxd
+boxd_state_dir: /var/lib/boxd
+
+boxd_release_dir: "{{ boxd_assets_dir }}/bin"
+# The node's own copy of the assets bundle (boxd-common/tasks/fetch-assets.yml).
+boxd_node_assets_root: /var/cache/boxd/assets
+boxd_config_local_dir: "{{ playbook_dir }}/../out/deploy-config"

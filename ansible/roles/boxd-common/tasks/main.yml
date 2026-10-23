@@ -1,0 +1,86 @@
+- name: Fetch the assets bundle on the node
+  include_tasks: fetch-assets.yml
+  when: boxd_assets_url | default('') != ''
+
+- name: Wait for apt lock to be released
+  shell: while fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+  changed_when: false
+
+- name: Set hostname
+  hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Map hostname in /etc/hosts (silences sudo reverse-lookup warning)
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    line: "127.0.1.1 {{ inventory_hostname }}"
+    state: present
+
+- name: Create boxd group
+  group:
+    name: "{{ boxd_group }}"
+    system: true
+
+- name: Create boxd user
+  user:
+    name: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    system: "{{ boxd_user_system }}"
+    shell: "{{ boxd_user_shell }}"
+    create_home: "{{ boxd_user_create_home }}"
+
+- name: Add boxd user to kvm group (workers)
+  user:
+    name: "{{ boxd_user }}"
+    groups: kvm
+    append: true
+  when: boxd_service is defined and boxd_service == 'boxd-worker'
+
+- name: Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  loop:
+    - "{{ boxd_config_dir }}"
+    - "{{ boxd_data_dir }}"
+    - "{{ boxd_data_dir }}/raft"
+    - "{{ boxd_data_dir }}/images"
+    - "{{ boxd_data_dir }}/vms"
+    - "{{ boxd_data_dir }}/kernels"
+    - "{{ boxd_run_dir }}"
+    - "{{ boxd_run_dir }}/vms"
+    - "{{ boxd_log_dir }}"
+
+- name: Create state directories on root disk (workers only)
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+  loop:
+    - "{{ boxd_state_dir }}"
+    - "{{ boxd_state_dir }}/raft"
+  when: boxd_service is defined and boxd_service == 'boxd-worker'
+
+- name: Ensure systemd-journald drop-in dir
+  file:
+    path: /etc/systemd/system/systemd-journald.service.d
+    state: directory
+    mode: "0755"
+
+- name: Drop in systemd-journald watchdog override
+  copy:
+    dest: /etc/systemd/system/systemd-journald.service.d/watchdog.conf
+    mode: "0644"
+    content: |
+      [Service]
+      WatchdogSec=15min
+  notify:
+    - reload systemd
+    - restart systemd-journald
+
