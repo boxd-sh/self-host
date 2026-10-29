@@ -1,5 +1,9 @@
 # Changelog
 
+## v2026.10.29.2
+
+- README: a short landing page; the install guide and reference move to docs/ (#30)
+
 ## v2026.10.29
 
 Maintenance release. Nothing to do: how clusters are installed is unchanged.

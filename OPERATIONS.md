@@ -2,7 +2,8 @@
 
 Day-to-day operations for a self-hosted boxd cluster: managing people and
 orgs, capacity, machines and workers, and what to do when something goes
-wrong. Installing, adding nodes and upgrading are in [README.md](README.md).
+wrong. Installing is in [docs/INSTALL.md](docs/INSTALL.md); adding nodes,
+upgrading and configuration are in [docs/REFERENCE.md](docs/REFERENCE.md).
 
 Everything here uses `boxd-ctl`, the operator CLI on every control node, plus
 `systemctl` and `journalctl` on the nodes. `boxd-ctl <command> --help` is the
@@ -30,7 +31,7 @@ organised by task and adds the context the help can't.
 ## Getting started
 
 Connect to a control node. There is no public SSH; on GCP go through IAP, on
-AWS through SSM (see [README.md](README.md#ssh-to-nodes)):
+AWS through SSM (see [docs/REFERENCE.md](docs/REFERENCE.md#ssh-to-nodes)):
 
 ```sh
 ./boxd-install gcloud compute ssh ubuntu@mycluster-control-0 --tunnel-through-iap \
@@ -96,7 +97,7 @@ Two consequences:
   production: a cluster with one control node loses these records with that
   node's disk. (When `apply` itself replaces a control node, for example
   for a subnet or `internal_ip` change, it carries the state across; see
-  README "Switching an existing cluster". A lost disk it can't.)
+  docs/REFERENCE.md "Switching an existing cluster". A lost disk it can't.)
 
 ## People and orgs
 
@@ -169,7 +170,7 @@ provider, so this is always an operator's step, and until then what they
 hold keeps working. With the cluster reachable only from your network, they
 lose their way in with their network access.
 
-**Single sign-on and existing accounts** (README "Single sign-on"). A
+**Single sign-on and existing accounts** (docs/REFERENCE.md "Single sign-on"). A
 person's first SSO sign-in gets a new account unless it links by email to
 the one they have, for the domains in `[oidc] link_email_domains`. It doesn't
 link when the provider says the email isn't verified, for an Entra ID guest
@@ -216,7 +217,7 @@ boxd-ctl org set-machine-defaults <org-id> --vcpu 2 --memory 8G
 ```
 
 To offer a new size, add it to `[templates].sizes` and re-apply (see
-[README.md](README.md)). Every apply sets each org's vCPU / memory quota to
+[docs/REFERENCE.md](docs/REFERENCE.md#machine-sizes-templates)). Every apply sets each org's vCPU / memory quota to
 the largest listed vCPU count and memory, so a hand-set `--cpu`/`--mem`
 lasts only until the next apply; `--max-vms` is left alone.
 
@@ -338,13 +339,13 @@ see [Retiring a worker for the free tier](#retiring-a-worker-for-the-free-tier))
 Only a key with `unlimited-worker-vcpus` lifts the limit: `boxd-ctl license
 status` lists a key's features, and a valid key without that feature still
 leaves the limit in place. With `[license] key_file` set, the installer
-installs the key on every `apply` (see [License key](README.md#license-key)
-in the README).
+installs the key on every `apply` (see [License key](docs/REFERENCE.md#license-key)
+in the reference).
 
 Telemetry can be turned off (`[telemetry] enabled = false`) only with a key
 that has the `telemetry-opt-out` feature. Once turned off it stays off, also
 after that key expires. A cluster that never had such a key always sends boxd
-its hourly usage report (see [Telemetry](README.md#telemetry) in the README).
+its hourly usage report (see [Telemetry](docs/REFERENCE.md#telemetry) in the reference).
 
 **What happens over the limit.** boxd refuses every request that adds a
 machine: a new machine, a fork, and a machine from a snapshot. It refuses
@@ -517,7 +518,7 @@ after its node id (`boxd-proxy-<n>`), which repeats from cluster to cluster.
 ## Certificates from your own CA
 
 Only for clusters with `[acme] ca = "local"` (setup in
-[README.md](README.md#tls-from-your-own-ca)). `boxd-control` signs every
+[docs/REFERENCE.md](docs/REFERENCE.md#tls-from-your-own-ca)). `boxd-control` signs every
 certificate with your intermediate CA; certificates live 30 days and renew
 with 10 days left. There is no revocation: a certificate that leaked stays
 valid until it expires, or until you rotate the intermediate.
@@ -598,14 +599,14 @@ written since the backup is gone. Backups cover disks only, not memory.
 Machine backups do not cover the control plane: see
 [What the installer owns](#what-the-installer-owns).
 
-With `[aws] bucket_access = "vpc"` (README "Buckets only inside the VPC"),
+With `[aws] bucket_access = "vpc"` (docs/INSTALL.md "Buckets only inside the VPC"),
 backup objects can be read and deleted only from inside the VPC: run
 `aws s3` commands against the bucket from a node, not from your laptop.
 
 ## Snapshot archive
 
 Only for clusters with `[snapshot_archive]` in `cluster.toml` (setup in
-[README.md](README.md#snapshot-archive)), on an assets version whose
+[docs/REFERENCE.md](docs/REFERENCE.md#snapshot-archive)), on an assets version whose
 `boxd-ctl snapshot --help` lists `archive`.
 
 A snapshot's bytes (its disk and memory images) live on the workers' data
@@ -732,7 +733,7 @@ Workers keep machine disks and their swap file on the data disk
 
 ### The console or sign-in is broken
 
-See [Troubleshooting in README.md](README.md#troubleshooting): DNS
+See [Troubleshooting in docs/REFERENCE.md](docs/REFERENCE.md#troubleshooting): DNS
 delegation, certificates, and missing sign-in buttons.
 
 ## Logs and support

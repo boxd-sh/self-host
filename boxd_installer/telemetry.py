@@ -1,7 +1,7 @@
 """Telemetry: [telemetry] enabled in cluster.toml.
 
 Every boxd cluster sends one usage report an hour to boxd: counts only, no
-personal data (README "Telemetry"). A cluster on the free tier always sends;
+personal data (docs/REFERENCE.md "Telemetry"). A cluster on the free tier always sends;
 with a license key that includes telemetry opt-out, `enabled = false` turns
 it off.
 

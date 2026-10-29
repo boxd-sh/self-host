@@ -146,7 +146,7 @@ def _resolve_ami(cfg) -> str:
 
 def tf_key_env(key: bytes) -> dict:
     """SSE-C for the S3 state object. Only applied with backend encrypt=true
-    (see backend_args), and the bucket must not block SSE-C (README)."""
+    (see backend_args), and the bucket must not block SSE-C (docs/INSTALL.md)."""
     return {"AWS_SSE_CUSTOMER_KEY": base64.b64encode(key).decode()}
 
 def backend_args(cfg) -> list[str]:

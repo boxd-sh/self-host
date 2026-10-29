@@ -145,7 +145,7 @@ def _apply(cfg, args) -> int:
     ansible.configure_orgs(cfg, cfg.machine_sizes())
 
     # The exact bundle this cluster now runs — with a channel, the only
-    # record of what to pin to come back here (README "Upgrades and rollback").
+    # record of what to pin to come back here (docs/REFERENCE.md "Upgrades and rollback").
     state.data["applied_assets"] = {"sha": cfg.assets_version, "channel": cfg.assets_channel}
     state.save()
 
@@ -158,7 +158,7 @@ def _apply(cfg, args) -> int:
         raise InstallError(
             "boxd-control can't register its ACME account: Google Trust Services says the "
             "EAB key was already used, so no certificate will ever be issued. Mint a new "
-            "key and re-apply (README Troubleshooting, \"Unknown external account binding\"):\n"
+            "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
             "  ./boxd-install state reset-eab\n  ./boxd-install apply")
     return 0
 
@@ -206,7 +206,7 @@ PROVIDERS_TEMPLATE = """\
 
 # Single sign-on (console) through your OpenID Connect provider: Entra ID,
 # Okta, Google Workspace, Keycloak. Its other keys go in cluster.toml's [oidc]
-# (README "Single sign-on"); only the client secret goes here. Redirect URI:
+# (docs/REFERENCE.md "Single sign-on"); only the client secret goes here. Redirect URI:
 #   https://app.<zone>/api/v1/auth/oidc/callback
 # With [oidc], GitHub and Google sign-in are off.
 # [oidc]

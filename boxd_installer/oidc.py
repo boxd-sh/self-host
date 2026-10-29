@@ -78,7 +78,7 @@ def _fetch(opener, url: str) -> tuple[int, object, bytes]:
         raise got["error"]
     return got["answer"]
 
-ISSUER_HINT = "is [oidc].issuer the provider's issuer? (see README, Single sign-on)"
+ISSUER_HINT = "is [oidc].issuer the provider's issuer? (see docs/REFERENCE.md, Single sign-on)"
 KEYS_HINT = "it's the discovery document's jwks_uri, where boxd-console fetches the keys"
 
 def _get(opener, url: str, types: tuple[str, ...], ca_set: bool, hint: str) -> bytes | None:
