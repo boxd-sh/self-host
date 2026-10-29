@@ -310,8 +310,7 @@
   failed_when: false
 
 # `ip link set ... master` exits 0 for a device already on that bridge, so the
-# change is read off the device's current master instead (as boxd's role,
-# BOX-631).
+# change is read off the device's current master instead.
 - name: Attach VXLAN to bridge
   shell: |
     set -e

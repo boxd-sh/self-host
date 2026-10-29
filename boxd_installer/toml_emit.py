@@ -1,7 +1,7 @@
 """Minimal TOML emitter for generated service configs.
 
-Ordering rule (load-bearing — a 2026-09-01 prod crash-loop came from
-violating it): within any table, scalars and plain arrays come first, then
+Ordering rule (load-bearing: violating it makes services crash-loop on a
+misread config): within any table, scalars and plain arrays come first, then
 sub-tables, then arrays-of-tables LAST. Otherwise TOML binds later keys into
 the last array element.
 """

@@ -1,5 +1,5 @@
 """[cluster].assets_version as a channel ("dev") resolved to a pinned sha, on
-the old per-customer path (BOXD_PRODUCT_LICENSE set; until step 5 part D).
+the old download path (BOXD_PRODUCT_LICENSE set).
 The signed release bucket: test_release_bundles.py.
 Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
@@ -66,7 +66,7 @@ class Resolve(unittest.TestCase):
         with self.assertRaises(InstallError) as cm:
             self.resolve("dev", mock.Mock(side_effect=err))
         self.assertIn("assets_version", str(cm.exception))
-        self.assertNotIn("publish-assets", str(cm.exception))
+        self.assertNotRegex(str(cm.exception), r"\bjust [a-z]")
 
     def test_a_pointer_without_a_sha_is_refused(self):
         with self.assertRaisesRegex(InstallError, "does not hold a git sha"):

@@ -1,4 +1,4 @@
-"""Bundles from the signed release bucket (BOX-640): the channel pointer, its
+"""Bundles from the signed release bucket: the channel pointer, its
 sequence number, release.json and the zip, checked before anything is
 unpacked. A fake bucket (files in a temporary directory, as file:// URLs) and
 a local key pair stand in for gs://boxd-releases and the release key.
@@ -487,7 +487,7 @@ class Cache(Case):
             with self.assertRaises(assets.DownloadFailed) as cm:
                 self.ensure(SHA)
         self.assertTrue(cm.exception.private)
-        self.assertIn("Current customers: set BOXD_PRODUCT_LICENSE", str(cm.exception))
+        self.assertIn("sets BOXD_PRODUCT_LICENSE (the old download path)", str(cm.exception))
         self.assertNotIn("Delete", str(cm.exception))
         with open(os.path.join(dest, "bin", "boxd-worker"), "rb") as fh:
             self.assertEqual(fh.read(), b"worker")
@@ -624,7 +624,7 @@ class ReDownload(Case):
                 self.assertIn(f"Delete {dest}, or run again when the download works", msg)
                 # The rewrap keeps .private (and the 403 hint).
                 self.assertIs(cm.exception.private, private)
-                self.assertEqual("Current customers: set BOXD_PRODUCT_LICENSE" in msg, private)
+                self.assertEqual("sets BOXD_PRODUCT_LICENSE (the old download path)" in msg, private)
                 self.assertTrue(os.path.exists(os.path.join(dest, "MANIFEST.json")))
 
     def test_an_unreadable_marker_is_damage_not_unsigned(self):
@@ -815,30 +815,6 @@ class NetworkVersusLocal(Case):
         self.assertIn("cannot be read", why)
 
 
-@unittest.skipUnless(os.path.exists(os.path.join(ROOT, "release", "customer.py")),
-                     "release/ is not shipped to customer repos")
-class CustomerStatus(Case):
-    """release/customer.py status: the shared channels, checked."""
-
-    def setUp(self):
-        super().setUp()
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("customer", os.path.join(ROOT, "release", "customer.py"))
-        self.customer = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.customer)
-
-    def test_a_signed_channel_shows_its_sha_and_sequence(self):
-        self.bucket.channel("beta", SHA, 2)
-        self.assertEqual(self.customer.release_channel("beta"), f"{SHA[:12]} (sequence 2)")
-
-    def test_a_bad_channel_says_why(self):
-        p = self.bucket.channel("beta", SHA, 2)
-        self.bucket.put("channels/beta", p.replace(b'"sequence":2', b'"sequence":2 '))
-        self.assertIn("BAD signature", self.customer.release_channel("beta"))
-        with mock.patch.object(self.customer.subprocess, "run",
-                               return_value=subprocess.CompletedProcess([], 1, b"", b"")):
-            self.assertIn("gcloud cannot read it either", self.customer.release_channel("latest"))
-
 class NoNetworkOrKeys(unittest.TestCase):
     """What does not need a key pair."""
 
@@ -886,7 +862,7 @@ class NoNetworkOrKeys(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(InstallError) as cm:
                 assets.resolve(cfg, None)
-        self.assertIn("Current customers: set BOXD_PRODUCT_LICENSE", str(cm.exception))
+        self.assertIn("sets BOXD_PRODUCT_LICENSE (the old download path)", str(cm.exception))
         self.assertIn("assets_version", str(cm.exception))
 
     def test_the_license_selects_the_old_path(self):

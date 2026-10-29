@@ -64,7 +64,7 @@
 # The migrations are staged in a scratch directory that "Clean up migrations"
 # removes again, so the host ends the run as it started: neither task changes
 # anything, and neither reports it. Applying them is idempotent and reports
-# nothing either (as boxd's role, BOX-631).
+# nothing either.
 - name: Copy schema migrations
   copy:
     src: "migrations/"

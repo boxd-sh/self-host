@@ -20,8 +20,8 @@ INSTALLER_TABLES = {"cluster", "network", "nodes", "license", "telemetry"} | set
 ACME_CAS = ("gts", "zerossl", "local")
 PRIVATE_NET = ipaddress.ip_network("10.0.0.0/8")
 SHA_RE = r"[0-9a-f]{40}"
-# A published channel (`just publish-assets <licensee> <channel>` in the boxd
-# repo); resolved to a sha at apply time by assets.resolve.
+# A channel boxd publishes (e.g. `latest`); resolved to a sha at apply time by
+# assets.resolve.
 CHANNEL_RE = r"[a-z][a-z0-9-]{0,39}"
 TOP_SCALARS: set[str] = set()
 
@@ -282,7 +282,7 @@ def _validate(doc: dict) -> None:
             except ValueError as e:
                 errs.append(f"{nm}: internal_ip: {e}")
         if "admin" in str(n.get("roles")):
-            errs.append(f"{nm}: the admin role is not supported (boxd-admin is not deployed)")
+            errs.append(f"{nm}: the admin role is not supported on a self-hosted cluster")
         is_worker = any(r.partition(":")[0] == "worker" for r in n.get("roles", []))
         if is_worker and not n.get("data_disk_gb"):
             errs.append(f"{nm}: worker nodes must set data_disk_gb (VM data lives "

@@ -1,15 +1,5 @@
--- Hourly rollup of `usage`: one row per VM per clock-hour, every metric
--- pre-aggregated the right way (cpu_delta_us summed; memory/disk gauges
--- avg/max; reserved snapshot) plus derived running/active seconds. This is the
--- long-term, query-cheap layer that billing + dashboards read; the raw `usage`
--- table (120d) stays for per-second drill-down.
---
--- Engine: ReplacingMergeTree(version) keyed on (user_id, vm_id, hour). Each
--- refresh RE-COMPUTES the recent hours in full from `usage FINAL` and APPENDs;
--- Replacing keeps the newest version per bucket, so the still-open hour is
--- corrected on the next refresh and closed hours become immutable. Retains 2
--- years (tunable) — independent of raw's 120d, so history outlives the raw
--- rows. Reads MUST use FINAL (or GROUP BY the sort key).
+-- Hourly rollup of `usage`: one row per VM per hour, refreshed every hour.
+
 CREATE TABLE IF NOT EXISTS usage_hourly (
     hour DateTime COMMENT 'Start of the clock-hour this row summarizes.',
     user_id String COMMENT 'VM owner — billing key.',
@@ -30,9 +20,6 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
 ORDER BY (user_id, vm_id, hour)
 TTL hour + INTERVAL 2 YEAR;
 
--- Refreshable view: every hour, recompute the last 3 hours from raw and append.
--- (3h window covers the still-open hour + late raw after a worker/CH blip.)
--- The body is just the read-time rollup SELECT, wrapped to run on a schedule.
 CREATE MATERIALIZED VIEW IF NOT EXISTS usage_hourly_mv
     REFRESH EVERY 1 HOUR APPEND TO usage_hourly AS
 SELECT

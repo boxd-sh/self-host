@@ -1,4 +1,4 @@
-"""[license] key_file (BOX-630 step 4a): validation, the key file check, the
+"""[license] key_file: validation, the key file check, the
 free tier warning, the worker type (an existing worker keeps its type; a new
 one without a key gets the free type), and `boxd-ctl license install` on
 apply. Run: python3 -m unittest discover -s tests"""
@@ -173,7 +173,7 @@ class VcpuTable(unittest.TestCase):
 
 
 class WorkerType(LicenseCluster):
-    """D1.3 rule 1 before D4.8: the free default is only for new workers."""
+    """The license never resizes a worker: the free default is only for new workers."""
 
     def test_new_worker_without_key_gets_the_free_type(self):
         for doc, name, free in ((aws_doc(), AWS_WORKER, "m8i.4xlarge"),

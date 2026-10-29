@@ -184,7 +184,7 @@ _LEARNER_UNITS = (("worker", "boxd-worker"), ("proxy", "boxd-proxy"), ("dns", "b
 
 def learners_gave_up(cfg) -> list[str]:
     """Learner units whose CURRENT run gave up registering ("registration
-    failed after N attempts") — e.g. a proxy from before BOX-631 that started
+    failed after N attempts") — e.g. a proxy from an older release that started
     before the leader existed. A newer proxy retries until it registers and
     logs "registration failed, retrying" meanwhile, which isn't giving up.
     Workers show up in `boxd-ctl status`; proxies don't, so the node count
@@ -342,7 +342,7 @@ def set_telemetry(cfg, enabled: bool, explicit: bool) -> None:
     value is in cluster.toml; otherwise it is the customer default.
 
     Control refuses `off` without a key that includes telemetry opt-out, and
-    an assets bundle from before step 6 has no `telemetry` command (it sends
+    an assets bundle from before telemetry has no `telemetry` command (it sends
     nothing either). A failure for an explicit cluster.toml value stops the
     apply; for the customer default it is a warning and the apply goes on,
     like `install_license` with an old bundle. (`enabled = false` without

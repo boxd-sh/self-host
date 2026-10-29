@@ -1353,9 +1353,10 @@ release until the key is installed, near the end. Machines that exist keep
 running, and nothing else is refused. Upgrade at a quiet time. If you apply
 without the key, new machines are refused until you add it and apply again.
 
-If boxd told you that telemetry stays off for your cluster, you have nothing
-to do for it: this installer's default for you is `[telemetry] enabled =
-false`, and your key includes telemetry opt-out ([Telemetry](#telemetry)).
+If boxd told you that telemetry stays off for your cluster, your key includes
+telemetry opt-out ([Telemetry](#telemetry)). A copy of the installer boxd
+made for you already defaults to `[telemetry] enabled = false`; with any
+other copy, set it in `cluster.toml`.
 
 #### Clusters installed before the release bucket
 

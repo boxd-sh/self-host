@@ -1,4 +1,4 @@
-"""Telemetry (BOX-630 step 6): [telemetry] enabled in cluster.toml.
+"""Telemetry: [telemetry] enabled in cluster.toml.
 
 Every boxd cluster sends one usage report an hour to boxd: counts only, no
 personal data (README "Telemetry"). A cluster on the free tier always sends;
@@ -9,15 +9,13 @@ it off.
 cluster.toml, or by the customer defaults file below. Then it runs
 `boxd-ctl telemetry on` or `off`, after it installs the key (`off` needs a
 key with telemetry opt-out). When it is unset, `apply` runs neither and the
-cluster keeps what it has: on for a new cluster (the boxd default, D6.1),
-and off for a current customer who got off once from their defaults file and
-then moved to the public installer, which has no such file (D7.5).
+cluster keeps what it has: on for a new cluster, and off for a cluster that
+was turned off before.
 
-A customer repo made by `release/customer.py sync` for a customer with
-`telemetry = false` (the customers from before the free tier, D6.1) holds a
-generated customer_defaults.toml next to this file, with [telemetry]
-enabled = false; it is used when cluster.toml sets none. Other customer repos
-and the public repo have no such file. An explicit cluster.toml value wins.
+A copy of the installer that boxd made for one customer may hold a
+customer_defaults.toml next to this file, with [telemetry] enabled = false;
+it is used when cluster.toml sets none. Without that file there is no
+default. An explicit cluster.toml value wins.
 """
 import os
 import tomllib

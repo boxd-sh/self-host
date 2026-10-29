@@ -1,16 +1,15 @@
 """Ensure the versioned assets zip is downloaded, verified and extracted at
 state/assets/<sha>/.
 
-The bundles are in boxd's release bucket, one per boxd commit (BOX-640):
+The bundles are in boxd's release bucket, one per boxd commit:
     bundles/<sha>/boxd-assets-<sha>.zip, release.json, release.json.sig
     channels/<channel>, channels/<channel>.<sequence>.sig
 Every signature is checked with `openssl pkeyutl -verify -rawin` against the
 public keys in release-keys/ before anything is unpacked.
 
-Until the release bucket is public (step 5 part D), a cluster whose
-BOXD_PRODUCT_LICENSE is set keeps the old per-customer path: the download key
-(32-byte hex) is the unguessable prefix in self-host-assets, env var only,
-never in cluster.toml. Part D removes that path (the _legacy_* functions)."""
+A cluster installed before the release bucket sets BOXD_PRODUCT_LICENSE and
+keeps its old download path (the _legacy_* functions) until it is moved to
+the release bucket. The key is an env var only, never in cluster.toml."""
 import base64
 import functools
 import hashlib
@@ -27,8 +26,8 @@ import zipfile
 
 from .util import InstallError, log
 
-# BOXD_RELEASES_URL: a copy of the bucket (file:// works), to test a bundle
-# before the bucket is public. The signatures are checked all the same.
+# BOXD_RELEASES_URL: a copy of the bucket (file:// works), to test a bundle.
+# The signatures are checked all the same.
 BASE_URL = os.environ.get("BOXD_RELEASES_URL", "https://storage.googleapis.com/boxd-releases").rstrip("/")
 KEYS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "release-keys")
 # The context prefix of a signed message: a channel signature can never pass
@@ -137,9 +136,10 @@ class UnknownKey(CannotCheck):
     download: update the installer. From the local cache: the cache is
     damaged (_signed_cache_problem)."""
 
-# Until step 5 part D the release bucket is private: GCS answers 401/403.
-PRIVATE_HINT = (" — the boxd release bucket is not public yet. Current customers: set "
-                "BOXD_PRODUCT_LICENSE (the old download path) until your boxd contact moves you")
+# GCS answers 401/403 when the bucket refuses the download.
+PRIVATE_HINT = (" — the boxd release bucket refused the download; if it persists, tell boxd. "
+                "A cluster installed before the release bucket sets BOXD_PRODUCT_LICENSE "
+                "(the old download path) until your boxd contact moves it")
 
 class DownloadFailed(InstallError):
     """The network or the bucket said no (HTTP error, unreachable). Never a
@@ -370,7 +370,7 @@ def _signed_download(sha: str, tmp_zip: str) -> tuple[bytes, bytes, dict]:
                            "Nothing was installed.")
     return body, sig, rel
 
-# --------------------------- the old per-customer path (until step 5 part D) --
+# --------------------------- the old download path (BOXD_PRODUCT_LICENSE) -----
 
 LEGACY_BASE_URL = "https://storage.googleapis.com/self-host-assets"
 
@@ -382,8 +382,7 @@ def _license() -> str:
 
 def _legacy_resolve(v: str) -> str:
     """`channels/<name>` next to the zips, a text object holding one sha,
-    written by `just publish-assets <licensee> <channel>` AFTER the zip, so
-    it never names a missing bundle."""
+    written AFTER the zip, so it never names a missing bundle."""
     url = f"{LEGACY_BASE_URL}/{_license()}/channels/{v}"
     req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
     try:

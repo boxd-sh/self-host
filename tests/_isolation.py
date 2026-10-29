@@ -1,9 +1,9 @@
 """Imported first by every test module: the tests never read this tree's
 boxd_installer/customer_defaults.toml.
 
-A customer tree (made by `release/customer.py sync`) has that file, and the
-installer reads it as the default of [telemetry] enabled (telemetry.py). A
-test that read it would pass in this repo and fail in a customer's. So this
+A tree may have that file, and the installer reads it as the default of
+[telemetry] enabled (telemetry.py). A test that read it would pass in a tree
+without the file and fail in one with it. So this
 points telemetry.CUSTOMER_DEFAULTS at a path that does not exist; an audit
 hook fails any open of the real path, and os.stat/os.lstat (behind
 os.path.isfile and exists) fail for it too, which `test_telemetry.Isolation`

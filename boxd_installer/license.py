@@ -1,4 +1,4 @@
-"""The boxd license key (BOX-630, step 4a): [license] key_file in
+"""The boxd license key: [license] key_file in
 cluster.toml, the free tier's worker vCPU limit, and the default worker type
 without a key.
 
@@ -7,7 +7,7 @@ Without a valid license key a boxd cluster may have at most 16 worker vCPUs
 refuses new machines while it is over. A key unlocks more; `apply` installs
 it on the cluster with `boxd-ctl license install` every time.
 
-boxd never stops a VM because of the license (D1.3 rule 1), so the license
+boxd never stops a VM because of the license, so the license
 never resizes a worker that exists: the free default type is only for
 workers terraform has not created yet.
 """
@@ -24,7 +24,7 @@ FREE_TIER_MAX_WORKER_VCPUS = 16
 FREE_WORKER_TYPES = {"aws": "m8i.4xlarge", "gcp": "n2-standard-16"}
 PAID_WORKER_TYPES = {"aws": "m8i.8xlarge", "gcp": "n2-standard-32"}
 
-# The text form of a license key (boxd-license, D2.7): `boxd-lic<N>_` and
+# The text form of a license key: `boxd-lic<N>_` and
 # base64url. Only the shape is checked here; control verifies the signature
 # (InstallLicense) and gives the reason when it refuses one.
 _KEY_RE = re.compile(r"boxd-lic[0-9]+_[A-Za-z0-9_-]+")

@@ -411,7 +411,7 @@ boxd-ctl license status
 ```
 
 ```text
-cluster id:    0f9033df4a8aef67587648d542016c7b
+cluster id:    5c3a0e7b19d24f68a0b1c2d3e4f50617
 license:       none
 mode:          enforce
 worker vCPUs:  24, limit 16: OVER THE LIMIT

@@ -2,7 +2,7 @@
 
 Please do not report security problems in public issues.
 
-- **In the public repository (`azin-tech/boxd-self-host`):** report them
+- **In the public repository (`boxd-sh/self-host`):** report them
   privately through GitHub: open the **Security** tab and choose **Report a
   vulnerability**.
 - **As a boxd customer** (your own copy of this installer, from a private

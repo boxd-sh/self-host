@@ -1,14 +1,11 @@
-"""[telemetry] (BOX-630 step 6): validation, the explicit-only rule, control's
-[telemetry] cloud and region, `boxd-ctl telemetry on|off` on apply, the
-validate line, and the customer defaults file that `release/customer.py sync`
-ships. Every test points telemetry.CUSTOMER_DEFAULTS at a temporary path, so
-the suite gives the same results in a customer tree that has the real file.
+"""[telemetry]: validation, the explicit-only rule, control's [telemetry]
+cloud and region, `boxd-ctl telemetry on|off` on apply, the validate line,
+and the customer defaults file. Every test points telemetry.CUSTOMER_DEFAULTS
+at a temporary path, so the suite gives the same results in a tree that has
+the real file.
 Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
-import argparse
 import glob
-import tarfile
-import importlib.util
 import io
 import os
 import shutil
@@ -16,7 +13,6 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
-import zipfile
 from contextlib import redirect_stdout
 from unittest import mock
 
@@ -26,8 +22,6 @@ from boxd_installer.util import InstallError
 from test_machine_sizes import FakeAlloc, FakeState, aws_doc, validate
 
 CONTROL = "boxd-aws-demo-control-0"
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RELEASE = os.path.join(ROOT, "release", "customer.py")
 REFUSED = ("Error: Telemetry can be turned off only with a license key that includes "
            "telemetry opt-out.")
 OLD_CTL = "error: unrecognized subcommand 'telemetry'"
@@ -287,114 +281,6 @@ class ValidateCommand(Isolated):
         out, logs = self.validate_out(aws_doc())
         self.assertIn("apply turns it off (this installer's default", out)
         self.assertTrue(any("there is no [license] key_file" in l for l in logs), logs)
-
-
-def load_customer():
-    spec = importlib.util.spec_from_file_location("customer", RELEASE)
-    customer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(customer)
-    return customer
-
-
-@unittest.skipUnless(os.path.exists(RELEASE), "release/ is not shipped to customer repos")
-class CustomerSync(Isolated):
-    """The real sync_one, against a local bare repo. A customer with
-    `telemetry = false` gets the defaults file (enabled = false) in the
-    release commit and in the zip, and a .gitignore that does not name it;
-    any other customer gets no file."""
-
-    def sync(self, c: dict) -> tuple:
-        """The real sync_one into a fresh local bare repo; returns a git
-        helper on the bare repo and the zip directory."""
-        customer = load_customer()
-        bare = os.path.join(self.dir, f"{c['licensee']}.git")
-        subprocess.run(["git", "init", "--quiet", "--bare", "-b", "main", bare], check=True)
-        real_run = customer.run
-
-        def run(cmd, *args, **kw):
-            if cmd[:2] == ["gh", "release"]:
-                return subprocess.CompletedProcess(cmd, 0, "", "")
-            cmd = [bare if str(x).startswith("git@github.com:") else x for x in cmd]
-            return real_run(cmd, *args, **kw)
-
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
-                             text=True, check=True).stdout.strip()
-        c = {"repo": f"azin-tech/boxd-installer-{c['licensee']}", "cloud": "aws",
-             "channel": "latest", "delivery": "zip", **c}
-        a = argparse.Namespace(push=True, notes=None, take_over=False)
-        dist = os.path.join(self.dir, f"dist-{c['licensee']}")
-        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
-        with mock.patch.object(customer, "run", side_effect=run), \
-                mock.patch.object(customer, "DIST", dist), \
-                mock.patch.object(customer, "log"), \
-                mock.patch.dict(os.environ, env), redirect_stdout(io.StringIO()):
-            customer.sync_one(c, sha, a, {})
-        git = lambda *args: subprocess.run(["git", "-C", bare, *args], capture_output=True,  # noqa: E731
-                                           text=True, check=True).stdout
-        return customer, git, dist
-
-    def test_the_release_commit_and_the_zip_have_the_file(self):
-        customer, git, dist = self.sync({"licensee": "acme", "telemetry": False})
-        self.assertIn(customer.CUSTOMER_DEFAULTS, git("ls-tree", "-r", "--name-only", "main"))
-        self.assertIn("enabled = false", git("show", f"main:{customer.CUSTOMER_DEFAULTS}"))
-        self.assertIn("Telemetry:", git("show", "main:CHANGELOG.md"))
-        # The customer tree tracks the file, and its .gitignore does not
-        # ignore it.
-        self.assertNotIn(customer.CUSTOMER_DEFAULTS, git("show", "main:.gitignore"))
-        zips = os.listdir(dist)
-        self.assertEqual(len(zips), 1, zips)
-        with zipfile.ZipFile(os.path.join(dist, zips[0])) as z:
-            name = f"boxd-installer-acme/{customer.CUSTOMER_DEFAULTS}"
-            self.assertIn(name, z.namelist())
-            self.assertIn(b"enabled = false", z.read(name))
-
-    def test_a_customer_without_the_setting_gets_no_file(self):
-        customer, git, dist = self.sync({"licensee": "newco"})
-        self.assertNotIn(customer.CUSTOMER_DEFAULTS, git("ls-tree", "-r", "--name-only", "main"))
-        self.assertNotIn("Telemetry:", git("show", "main:CHANGELOG.md"))
-        with zipfile.ZipFile(os.path.join(dist, os.listdir(dist)[0])) as z:
-            self.assertFalse([n for n in z.namelist() if n.endswith("customer_defaults.toml")])
-
-    def test_the_public_tree_has_no_defaults_file(self):
-        """The tree a release ships from (git archive of release/ship.txt at
-        HEAD, as sync and the public repo use it) has no defaults file: this
-        repo's .gitignore keeps it out of every commit."""
-        customer = load_customer()
-        arch = subprocess.run(["git", "archive", "--format=tar", "HEAD", "--",
-                               *customer.ship_paths()], cwd=ROOT, capture_output=True,
-                              check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(arch)) as t:
-            names = t.getnames()
-        self.assertIn("boxd_installer/telemetry.py", names)
-        self.assertFalse([n for n in names if n.endswith("customer_defaults.toml")], names)
-
-    def test_current_customers_keep_telemetry_off(self):
-        import glob
-        for path in glob.glob(os.path.join(ROOT, "customers", "*.toml")):
-            name = os.path.basename(path)
-            if name.startswith("e2e-"):
-                continue  # our own test customers
-            with open(path, "rb") as fh:
-                self.assertIs(tomllib.load(fh).get("telemetry"), False, name)
-
-    def test_the_writer(self):
-        customer = load_customer()
-        work = os.path.join(self.dir, "tree")
-        os.makedirs(os.path.join(work, "boxd_installer"))
-        path = os.path.join(work, customer.CUSTOMER_DEFAULTS)
-        self.assertEqual(customer.write_customer_defaults(
-            work, {"licensee": "acme", "telemetry": False}), path)
-        shutil.copy(path, self.defaults)
-        self.assertEqual(telemetry.setting(config.Config(aws_doc())),
-                         (False, telemetry.CUSTOMER_DEFAULT))
-        # Without telemetry = false: no file, and a stale one is removed, so
-        # apply leaves the cluster's setting alone (the explicit-only rule).
-        for c in ({"licensee": "new"}, {"licensee": "new", "telemetry": True}):
-            self.assertTrue(os.path.exists(path))
-            self.assertIsNone(customer.write_customer_defaults(work, c))
-            self.assertFalse(os.path.exists(path))
-            customer.write_customer_defaults(work, {"licensee": "acme", "telemetry": False})
 
 
 class Isolation(unittest.TestCase):

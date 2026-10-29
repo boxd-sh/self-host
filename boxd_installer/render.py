@@ -168,7 +168,7 @@ class Renderer:
     def _proxy_host(self, node) -> str:
         """This proxy's own dial name (p0.<zone>, p1.<zone>, …) — published via
         ListProxyNodes so clients dial a NAME: an IP-literal authority sends no
-        SNI and the proxy rejects the handshake (BOX-236). Covered by the zone
+        SNI and the proxy rejects the handshake. Covered by the zone
         wildcard cert."""
         proxies = self.cfg.nodes_with("proxy")
         idx = next(i for i, n in enumerate(proxies) if n.name == node.name)
@@ -442,7 +442,7 @@ class Renderer:
 
     def downloads(self) -> dict[str, str]:
         """CLI install artifacts served at app.<zone>/downloads. The binaries
-        (all platforms, fetched from prod at package time) and the upstream
+        (all platforms) and the upstream
         install script template come from the assets zip; this renders the
         per-zone manifests and parameterizes the script."""
         import hashlib

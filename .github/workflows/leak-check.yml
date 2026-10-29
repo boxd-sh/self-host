@@ -1,12 +1,11 @@
-# gitleaks on every push and pull request, in the repos generated from this
-# one (azin-tech/boxd-self-host and the customer repos; release/ship.txt
-# ships this file). Not in boxd-installer itself: its tree and history hold
-# the demo cluster's .env and cluster.toml on purpose. The generator runs the
-# same scan, and the licensee-name check, before every push (release/customer.py).
+# gitleaks on every push and pull request. Every release runs the same scan
+# before it is pushed; this catches what a change outside a release adds.
+# It skips the repository releases are made from: the one with release/,
+# which no release ships.
 #
 # It scans the tree, and only the commits this push or pull request adds:
-# older history is not rescanned (customer repos have old releases with a
-# known false positive that no new commit can change). A force push scans
+# older history is not rescanned (older releases may hold a known false
+# positive that no new commit can change). A force push scans
 # BEFORE..SHA: the commits SHA has and the old head had not; if the old
 # head can't be fetched, the job fails.
 name: leak-check
@@ -23,22 +22,27 @@ env:
 
 jobs:
   gitleaks:
-    if: github.repository != 'azin-tech/boxd-installer'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      - id: gate
+        run: |
+          if [ -d release ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
       - name: install gitleaks (sha256-pinned)
+        if: steps.gate.outputs.skip != 'true'
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           curl -fsSLo "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
       - name: scan the tree
+        if: steps.gate.outputs.skip != 'true'
         run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
       - name: scan the new commits
+        if: steps.gate.outputs.skip != 'true'
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
