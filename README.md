@@ -159,7 +159,8 @@ new copy from boxd's own installer repository.
 This repository is licensed under the [Apache License 2.0](LICENSE). See
 [NOTICE](NOTICE). The license covers this repository only. The boxd software
 the installer downloads and runs on your cluster (the binaries, console, CLI,
-host kernel and VM images in the release bundle) is licensed separately and
-isn't covered by it. You may not modify, patch or reverse engineer it, or
-work around its license check, vCPU limit or telemetry, except where the law
-allows it.
+host kernel and VM images in the release bundle) is licensed separately under
+the [Boxd Binary License](LICENSE-BINARIES.md) and isn't covered by it. You
+may use it for personal use and your company's internal business operations.
+You may not redistribute it, or decompile, disassemble or reverse engineer it,
+except where the law allows it.
