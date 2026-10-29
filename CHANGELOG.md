@@ -1,5 +1,9 @@
 # Changelog
 
+## v2026.10.29.3
+
+- README: a banner and the diagram in the boxd website's dark style
+
 ## v2026.10.29.2
 
 - README: a short landing page; the install guide and reference move to docs/ (#30)

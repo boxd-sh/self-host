@@ -1,3 +1,5 @@
+<img alt="boxd self-host: your own boxd cluster, in your own cloud. Free up to 16 worker vCPUs." src="docs/banner.png" width="100%">
+
 # boxd self-host
 
 **Run a complete [boxd](https://boxd.sh) cluster in your own Google Cloud
@@ -30,10 +32,7 @@ same install one step at a time.
 
 ## What runs in your cloud
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/overview-dark.svg">
-  <img alt="Your team reaches the edge nodes (console and API, proxy, dns). Behind them are the control and metrics nodes, the workers running microVMs, and your own buckets, all in your GCP project or AWS account." src="docs/overview-light.svg" width="640">
-</picture>
+<img alt="Your team reaches the edge nodes (console and API, proxy, dns). Behind them are the control and metrics nodes, the workers running microVMs, and your own buckets, all in your GCP project or AWS account." src="docs/overview.svg" width="640">
 
 A cluster is made of a few node roles. The **control** nodes run the
 cluster's state over raft. The **workers** run the microVMs under KVM, on
@@ -161,4 +160,6 @@ This repository is licensed under the [Apache License 2.0](LICENSE). See
 [NOTICE](NOTICE). The license covers this repository only. The boxd software
 the installer downloads and runs on your cluster (the binaries, console, CLI,
 host kernel and VM images in the release bundle) is licensed separately and
-isn't covered by it.
+isn't covered by it. You may not modify, patch or reverse engineer it, or
+work around its license check, vCPU limit or telemetry, except where the law
+allows it.
