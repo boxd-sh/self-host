@@ -1,0 +1,22 @@
+# The unit tests, on every push and pull request. Python 3.12, as in the
+# tools image (docker/Dockerfile). Tests that need terraform or ansible skip
+# without them.
+name: ci
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m unittest discover -s tests

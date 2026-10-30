@@ -2,7 +2,7 @@
 from cluster.toml + allocation + terraform outputs.
 
 Projection map — which cluster.toml service tables reach which service —
-mirrors how the boxd binaries share one BoxdConfig schema (see DESIGN.md).
+mirrors how the boxd binaries share one BoxdConfig schema.
 """
 from . import clouds, local_ca, telemetry, toml_emit
 from .config import OIDC_REQUIRED, resolver_addr, rust_trim

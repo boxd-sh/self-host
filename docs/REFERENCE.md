@@ -651,9 +651,10 @@ a broken CA.
 
 ### Updating the installer
 
-This repo is released by boxd as tagged versions. Each one is listed in
-[CHANGELOG.md](../CHANGELOG.md) and published as a GitHub Release (watch the
-repo → Custom → Releases to be notified). To take one:
+This repo is released by boxd as tagged versions, each with a GitHub Release
+that holds its notes (watch the repo → Custom → Releases to be notified).
+`main` always holds the latest release; work in progress is on `dev`. To take
+one:
 
 ```sh
 git fetch --tags
@@ -665,13 +666,13 @@ source ~/.boxd-<cluster>.env
 
 - Your `cluster.toml` and env file aren't tracked, so a pull never touches them.
 - **Received the installer as a zip?** Unzip the new release next to the old
-  one, copy your `cluster.toml` into it, and run from the new folder. The
-  release notes are in its `CHANGELOG.md`.
+  one, copy your `cluster.toml` into it, and run from the new folder. Its
+  release notes come with it, in `CHANGELOG.md`.
 - If the release moved to a new tools image, `./boxd-install` pulls it on its
   next run.
 - An installer release changes how the cluster is installed (terraform,
   ansible, these docs). The boxd version it runs comes from `assets_version`:
-  see the next section. Read the CHANGELOG entry before you apply: it says
+  see the next section. Read the release notes before you apply: they say
   when a release needs anything from you.
 
 ### Upgrades and rollback
@@ -1112,7 +1113,7 @@ When the cluster is gone for good, also:
 - **`apply` fails in terraform on quota** (`QUOTA_EXCEEDED`,
   `VcpuLimitExceeded`): raise the quota (step 2 of your walkthrough) and
   re-run.
-- **`can't pull ghcr.io/…boxd-installer-tools`** on the first run: no network
+- **`can't pull ghcr.io/…self-host-tools`** on the first run: no network
   to ghcr.io, or a proxy in the way. `./boxd-install` builds the image locally
   instead. That works, it's just slower.
 - **Console unreachable right after the first apply**: the DNS delegation

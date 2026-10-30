@@ -1,7 +1,5 @@
-# gitleaks on every push and pull request. Every release runs the same scan
-# before it is pushed; this catches what a change outside a release adds.
-# It skips the repository releases are made from: the one with release/,
-# which no release ships.
+# gitleaks on every push and pull request. A release runs the same scan
+# again on the commit it releases.
 #
 # It scans the tree, and only the commits this push or pull request adds:
 # older history is not rescanned (older releases may hold a known false
@@ -28,21 +26,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - id: gate
-        run: |
-          if [ -d release ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
       - name: install gitleaks (sha256-pinned)
-        if: steps.gate.outputs.skip != 'true'
         run: |
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           curl -fsSLo "$RUNNER_TEMP/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
           echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$f" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP" gitleaks
       - name: scan the tree
-        if: steps.gate.outputs.skip != 'true'
         run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
       - name: scan the new commits
-        if: steps.gate.outputs.skip != 'true'
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}

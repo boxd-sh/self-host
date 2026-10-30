@@ -4,11 +4,11 @@
 #
 # Pins match what the installer is tested with. To change one: edit it here,
 # bump docker/VERSION (the image tag ./boxd-install pulls), merge; CI
-# publishes ghcr.io/azin-tech/boxd-installer-tools:<VERSION> for amd64+arm64.
+# publishes ghcr.io/boxd-sh/self-host-tools:<VERSION> for amd64+arm64.
 FROM python:3.12.12-slim-bookworm
 # Links the ghcr package to the repo: repo admins administer it, and its
 # page shows where it's built from.
-LABEL org.opencontainers.image.source="https://github.com/azin-tech/boxd-installer" \
+LABEL org.opencontainers.image.source="https://github.com/boxd-sh/self-host" \
       org.opencontainers.image.description="Tools the boxd self-host installer runs with (./boxd-install)"
 
 ARG TARGETARCH

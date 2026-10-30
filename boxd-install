@@ -11,13 +11,13 @@
 # any host install); gcloud's ssh key in ~/.config/boxd-install/ssh. BOXD_STATE_KEY, BOXD_PRODUCT_LICENSE and AWS_* pass
 # through from your environment by name; their values never reach a command
 # line. So does BOXD_RELEASES_URL (a copy of boxd's release bucket, for
-# tests); a file:// one is mounted read-only at the same path. The image is ghcr.io/azin-tech/boxd-installer-tools:<docker/VERSION>;
+# tests); a file:// one is mounted read-only at the same path. The image is ghcr.io/boxd-sh/self-host-tools:<docker/VERSION>;
 # if it can't be pulled it is built locally from docker/Dockerfile.
 # BOXD_INSTALLER_IMAGE overrides it.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IMAGE="${BOXD_INSTALLER_IMAGE:-ghcr.io/azin-tech/boxd-installer-tools:$(cat docker/VERSION)}"
+IMAGE="${BOXD_INSTALLER_IMAGE:-ghcr.io/boxd-sh/self-host-tools:$(cat docker/VERSION)}"
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1 && ! err=$(docker pull -q "$IMAGE" 2>&1); then
     echo "boxd-install: can't pull $IMAGE — not published, not public, or no network (${err##*$'\n'})" >&2
     echo "boxd-install: building it locally instead — once, a few minutes, ~1.8 GB" >&2
