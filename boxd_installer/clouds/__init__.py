@@ -4,8 +4,7 @@ store, the operator ssh path, preflight, and a few defaults. Allocation,
 rendering, the ansible tree, assets and seeding are cloud-neutral.
 
 cluster.toml selects the adapter by carrying exactly one cloud table
-([gcp], [aws] or [metal]); see DESIGN.md "Clouds" for the contract each must
-meet. metal has no terraform (TF_DIR is None): the hosts are given."""
+([gcp], [aws] or [metal]). metal has no terraform (TF_DIR is None): the hosts are given."""
 from . import aws, gcp, metal
 
 CLOUDS = {"gcp": gcp, "aws": aws, "metal": metal}

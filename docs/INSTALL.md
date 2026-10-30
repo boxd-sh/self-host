@@ -32,7 +32,7 @@ You need:
 `./boxd-install` runs `./install.py` inside a Docker image that carries every
 tool the installer uses (terraform, ansible, gcloud, the aws CLI with the
 Session Manager plugin, ssh, openssl) at tested versions. The first run pulls
-it from `ghcr.io/azin-tech/boxd-installer-tools` (about 1.8 GB). If it can't
+it from `ghcr.io/boxd-sh/self-host-tools` (about 1.8 GB). If it can't
 be pulled, it's built locally from `docker/`, once, in a few minutes.
 
 ```sh

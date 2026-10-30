@@ -1,0 +1,42 @@
+# Publishes the installer tools image (docker/) as
+# ghcr.io/boxd-sh/self-host-tools:<docker/VERSION>, amd64 + arm64. It runs
+# on dev, so the image exists before a release moves main to the commit that
+# names it. A VERSION that is already published is never overwritten: bump it.
+name: tools-image
+on:
+  push:
+    branches: [dev, release/v1]
+    paths: [docker/**]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: v
+        run: echo "image=ghcr.io/boxd-sh/self-host-tools:$(cat docker/VERSION)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: refuse to overwrite a published tag
+        run: |
+          if docker buildx imagetools inspect "${{ steps.v.outputs.image }}" >/dev/null 2>&1; then
+            echo "::error::${{ steps.v.outputs.image }} exists — bump docker/VERSION"; exit 1
+          fi
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.v.outputs.image }}

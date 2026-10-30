@@ -14,7 +14,7 @@ your machine is Docker.
 | [Install on bare metal](docs/INSTALL.md#install-on-bare-metal)
 | [Reference](docs/REFERENCE.md)
 | [Operations](OPERATIONS.md)
-| [Changelog](CHANGELOG.md)
+| [Releases](https://github.com/boxd-sh/self-host/releases)
 
 ## How to run
 
@@ -151,21 +151,15 @@ put it in a file next to `cluster.toml` and run `apply` again.
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | configuration, upgrades, day-2 operations, troubleshooting |
 | [`OPERATIONS.md`](OPERATIONS.md) | running the cluster day to day (`boxd-ctl`) |
 | [`INSTALL-PROMPT.md`](INSTALL-PROMPT.md) | the same install, with Claude Code |
-| [`CHANGELOG.md`](CHANGELOG.md) | what changed in each release of this repo |
 | `cluster.example.toml`, `examples/{gcp,aws,metal}/cluster.toml` | your starting config; copy it to `cluster.toml`, which git ignores |
 | [`SECURITY.md`](SECURITY.md) | how to report a security problem |
 
 ## Contributing
 
-This repository is generated: each release replaces its whole tree with a
-new copy from boxd's own installer repository.
-
-- **Issues are welcome**: bugs, questions, missing features, unclear docs.
-- **Pull requests are not merged.** The next release would overwrite them.
-  Open an issue that describes the change instead; we make it upstream, and it
-  comes back in a release.
-- **Security problems:** do not open a public issue. Follow
-  [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome. Pull requests go to `dev`; `main` holds
+the latest release. [CONTRIBUTING.md](CONTRIBUTING.md) says how to run the
+tests. Report security problems privately, as [SECURITY.md](SECURITY.md)
+describes, not in a public issue.
 
 ## License
 
