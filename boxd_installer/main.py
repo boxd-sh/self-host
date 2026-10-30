@@ -7,7 +7,7 @@ import tempfile
 import shutil as _shutil
 import subprocess
 
-from . import (ansible, assets, composio, config, control_carry, license, local_ca,
+from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
                oidc, remote_state, render, telemetry, tf)
 from .state import State
 from .util import InstallError, log
@@ -78,21 +78,27 @@ def _apply(cfg, args) -> int:
     state.ensure_keypairs()
     ansible.set_keys_dir(state.keys_dir)
     os.makedirs(args.out_dir, exist_ok=True)
+    if not clouds.provisions(cfg):
+        # Terraform puts the deploy key on cloud instances; on metal the
+        # operator does, so this stops a first apply until they have.
+        ansible.check_hosts(cfg, state.deploy_pubkey())
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     assets.console_tarball(assets_root)
 
-    tf.init(cfg)
-    # A worker that exists keeps its type: the license never resizes one.
-    existing = tf.instance_types(cfg)
-    for warning in license.free_tier_warnings(cfg, existing):
-        log(f"warning: {warning}")
-    tfvars = tf.write_tfvars(cfg, state, args.out_dir, existing)
-    plan = os.path.join(args.out_dir, "tf.plan")
-    tf.plan(cfg, tfvars, plan)
-    # Before the apply: a replaced control node takes its state with it.
-    control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
-    tf.apply_plan(cfg, plan)
+    # metal: the hosts exist, so there is nothing to plan or replace.
+    if clouds.provisions(cfg):
+        tf.init(cfg)
+        # A worker that exists keeps its type: the license never resizes one.
+        existing = tf.instance_types(cfg)
+        for warning in license.free_tier_warnings(cfg, existing):
+            log(f"warning: {warning}")
+        tfvars = tf.write_tfvars(cfg, state, args.out_dir, existing)
+        plan = os.path.join(args.out_dir, "tf.plan")
+        tf.plan(cfg, tfvars, plan)
+        # Before the apply: a replaced control node takes its state with it.
+        control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
+        tf.apply_plan(cfg, plan)
     tf_out = tf.read_outputs(cfg, state)
     ansible.set_tf_outputs(tf_out)
 
@@ -107,6 +113,9 @@ def _apply(cfg, args) -> int:
     _write_out(r.render_all(), args.out_dir)
 
     ansible.preflight(cfg)
+    if not clouds.provisions(cfg):
+        for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
+            log(f"warning: {warning}")
     ansible.converge(cfg, args.out_dir, assets_root,
                      assets.host_kernel_release(assets_root),
                      control_carry.carry_dir(state))
@@ -164,6 +173,10 @@ def _apply(cfg, args) -> int:
 
 def cmd_destroy(args) -> int:
     cfg = config.load(args.cluster)
+    if not clouds.provisions(cfg):
+        raise InstallError("destroy removes what terraform created; on [metal] the installer "
+                           "created no hosts, so there is nothing for it to destroy. Reinstall "
+                           "or wipe the hosts yourself (docs/INSTALL.md \"Install on bare metal\")")
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
         state = State(args.state_dir)
         tfvars = os.path.join(args.out_dir, "terraform.tfvars.json")

@@ -381,10 +381,12 @@ class Renderer:
             "  vars:",
             "    ansible_user: ubuntu",
             f"    ansible_ssh_private_key_file: {self.state.keys_dir}/boxd-deploy",
-            "    ansible_ssh_common_args: >-",
-            f'      -o ProxyCommand="{clouds.get(cfg).ssh_proxy_command(cfg)}"',
-            "  children:",
         ]
+        # metal: direct ssh to each node's ansible_host, no tunnel.
+        if proxy_cmd := clouds.get(cfg).ssh_proxy_command(cfg):
+            lines += ["    ansible_ssh_common_args: >-",
+                      f'      -o ProxyCommand="{proxy_cmd}"']
+        lines.append("  children:")
         for group in ("control", "proxy", "console", "dns", "worker", "metrics"):
             nodes = cfg.nodes_with(group)
             if not nodes:

@@ -116,9 +116,13 @@ def destroy(cfg, tfvars_path: str) -> None:
         f"-var-file={os.path.abspath(tfvars_path)}")
 
 def read_outputs(cfg, state) -> dict:
-    res = _tf(cfg, "output", "-json", capture=True)
-    raw = json.loads(res.stdout)
-    out = {k: v["value"] for k, v in raw.items()}
+    """terraform's outputs; on metal (no terraform) the adapter's, from
+    cluster.toml. Cached either way, for `render`."""
+    if clouds.provisions(cfg):
+        res = _tf(cfg, "output", "-json", capture=True)
+        out = {k: v["value"] for k, v in json.loads(res.stdout).items()}
+    else:
+        out = clouds.get(cfg).outputs(cfg)
     _check(out)
     cache = os.path.join(state.dir, "tf-outputs.json")
     fd = os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

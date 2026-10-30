@@ -284,11 +284,13 @@ def _validate(doc: dict) -> None:
         if "admin" in str(n.get("roles")):
             errs.append(f"{nm}: the admin role is not supported on a self-hosted cluster")
         is_worker = any(r.partition(":")[0] == "worker" for r in n.get("roles", []))
-        if is_worker and not n.get("data_disk_gb"):
-            errs.append(f"{nm}: worker nodes must set data_disk_gb (VM data lives "
-                        "on the data disk; the 50G boot disk cannot hold it)")
-        if not is_worker and n.get("data_disk_gb"):
-            errs.append(f"{nm}: data_disk_gb is only valid on worker nodes")
+        # Given hosts (no terraform): the adapter checks their disks.
+        if mod.TF_DIR is not None:
+            if is_worker and not n.get("data_disk_gb"):
+                errs.append(f"{nm}: worker nodes must set data_disk_gb (VM data lives "
+                            "on the data disk; the 50G boot disk cannot hold it)")
+            if not is_worker and n.get("data_disk_gb"):
+                errs.append(f"{nm}: data_disk_gb is only valid on worker nodes")
         if "machine_type" in n and not (isinstance(n["machine_type"], str)
                                         and n["machine_type"]):
             errs.append(f"{nm}: machine_type must be a quoted string, e.g. "

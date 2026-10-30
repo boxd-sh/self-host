@@ -1,7 +1,7 @@
 # Install boxd with Claude Code
 
-A prompt for Claude Code that installs a self-hosted boxd cluster on GCP or
-AWS by following this repository's docs/INSTALL.md step by step, stopping after each
+A prompt for Claude Code that installs a self-hosted boxd cluster on GCP,
+AWS or bare metal by following this repository's docs/INSTALL.md step by step, stopping after each
 step for your OK, and then checks the cluster end to end. It adds no steps of
 its own: docs/INSTALL.md is the procedure, and this prompt is how to walk it.
 
@@ -18,8 +18,11 @@ following docs/INSTALL.md, then verify it. Stop after each step, tell me what
 happened, and wait for my OK before the next one.
 
 ### My inputs
-- Cloud: `<gcp | aws>`. Walkthrough: docs/INSTALL.md "Install on GCP" or "Install on AWS".
+- Cloud: `<gcp | aws | metal>`. Walkthrough: docs/INSTALL.md "Install on GCP",
+  "Install on AWS" or "Install on bare metal".
 - GCP project / AWS profile: `<…>`; region `<…>`; zone or AZ `<…>`
+- Bare metal instead: each host's addresses (internal, public, ssh), the
+  private NIC's name, each worker's data disk
 - Cluster name: `<CLUSTER>` (node names start with it)
 - DNS zone: `<ZONE>`. I own its parent zone and add the delegation records myself.
 - Certificate contact email: `<EMAIL>`
@@ -72,8 +75,8 @@ and give me a table of pass/fail with evidence:
    HTTPS at `https://t1.<ZONE>` (serve something on port 8000 first).
 7. A VM can't reach the cloud metadata service: `curl -m3 http://169.254.169.254/`
    inside t1 fails.
-8. A second `apply` with no changes: terraform reports no changes and no boxd
-   service restarts.
+8. A second `apply` with no changes: terraform reports no changes (bare metal
+   has no terraform) and no boxd service restarts.
 
 Then delete `t1`, and write `HANDOVER.md` (untracked): the URLs, where the env
 file and `cluster.toml` live (and that the state key must be in a password

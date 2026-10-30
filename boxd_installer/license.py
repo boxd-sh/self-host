@@ -14,6 +14,7 @@ workers terraform has not created yet.
 import os
 import re
 
+from . import clouds
 from .util import InstallError
 
 FREE_TIER_MAX_WORKER_VCPUS = 16
@@ -128,7 +129,8 @@ def tfvars_machine_type(cfg, node, existing: dict[str, str] | None = None) -> st
 
 
 def free_tier_warnings(cfg, existing: dict[str, str] | None = None,
-                       assume_new: bool = False) -> list[str]:
+                       assume_new: bool = False,
+                       counted: dict[str, int] | None = None) -> list[str]:
     """Without a key: the workers over the free limit, and worker types whose
     vCPUs are unknown. Never an error: the cluster installs and runs, and
     refuses new machines while it is over. Raises when [license].key_file is
@@ -136,12 +138,18 @@ def free_tier_warnings(cfg, existing: dict[str, str] | None = None,
     terraform state): an over-limit warning adds that workers without
     machine_type were counted as new ones and that apply counts the types
     that exist. Under the limit validate says nothing; apply checks the real
-    types anyway."""
+    types anyway. `counted`: each worker's logical CPUs, read on the host
+    (metal, which has no machine types); without it metal says nothing."""
     if key_path(cfg):
+        return []
+    if counted is None and not clouds.provisions(cfg):
         return []
     out = []
     total, unknown = 0, []
     for n in cfg.nodes_with("worker"):
+        if counted is not None:
+            total += counted[n.name]
+            continue
         t = worker_type(cfg, n, existing)
         v = vcpus(cfg.cloud_name, t)
         if v is None:

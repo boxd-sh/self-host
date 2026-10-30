@@ -3,30 +3,34 @@
 # boxd self-host
 
 **Run a complete [boxd](https://boxd.sh) cluster in your own Google Cloud
-project or AWS account.** You get microVMs that boot in 4 ms and can be forked
-and snapshotted, each with its own SSH and HTTPS, along with the console, DNS
-and automations. Everything is set by one config file and installed by one
-command. The only thing to install on your machine is Docker.
+project or AWS account, or on servers you already run.** You get microVMs
+that boot in 4 ms and can be forked and snapshotted, each with its own SSH
+and HTTPS, along with the console, DNS and automations. Everything is set by
+one config file and installed by one command. The only thing to install on
+your machine is Docker.
 
 [Install on GCP](docs/INSTALL.md#install-on-gcp)
 | [Install on AWS](docs/INSTALL.md#install-on-aws)
+| [Install on bare metal](docs/INSTALL.md#install-on-bare-metal)
 | [Reference](docs/REFERENCE.md)
 | [Operations](OPERATIONS.md)
 | [Changelog](CHANGELOG.md)
 
 ## How to run
 
-Choose the cloud you already use.
+Choose the cloud you already use, or bring your own hosts.
 
 | Run it on | You need | The command | Install |
 |-----------|----------|-------------|---------|
 | GCP | a Google Cloud project with billing | `./boxd-install apply` | [Install on GCP](docs/INSTALL.md#install-on-gcp) |
 | AWS | an AWS account | `./boxd-install apply` | [Install on AWS](docs/INSTALL.md#install-on-aws) |
+| Bare metal | Ubuntu 24.04 hosts you prepare: ssh, a private network, KVM on workers | `./boxd-install apply` | [Install on bare metal](docs/INSTALL.md#install-on-bare-metal) |
 
-On either cloud you also need a DNS zone whose parent zone you can add records
-to, such as `boxd.example.com` under `example.com`. Set aside about an hour:
-most of it is `apply`, which runs on its own for 20–40 minutes. Each guide
-ends with you signed in to your cluster's console and starting your first VM.
+Wherever you run it, you also need a DNS zone whose parent zone you can add
+records to, such as `boxd.example.com` under `example.com`. Set aside about
+an hour: most of it is `apply`, which runs on its own for 20–40 minutes. Each
+guide ends with you signed in to your cluster's console and starting your
+first VM.
 [INSTALL-PROMPT.md](INSTALL-PROMPT.md) has Claude Code take you through the
 same install one step at a time.
 
@@ -44,9 +48,10 @@ One node can have several roles. The examples put every role except the worker
 on a single control node and add one worker.
 
 Every install is driven by `cluster.toml`. Its state, including TLS keys, node
-identities and provider secrets, is encrypted in a bucket you own, under a key
-that only you hold. Binaries, the console, the CLI, the host kernel and the VM
-image come in a release bundle that boxd signs. The installer checks that
+identities and provider secrets, is encrypted in a bucket you own (on bare
+metal, a file next to `cluster.toml`), under a key that only you hold.
+Binaries, the console, the CLI, the host kernel and the VM image come in a
+release bundle that boxd signs. The installer checks that
 signature against [`release-keys/`](release-keys) before it unpacks anything.
 
 ## What you get
@@ -64,8 +69,9 @@ signature against [`release-keys/`](release-keys) before it unpacks anything.
   [single sign-on](docs/REFERENCE.md#single-sign-on-oidc) through Entra ID,
   Okta, Google Workspace or Keycloak.
 - **Certificates handled for you.** They come from Google Trust Services on
-  GCP and ZeroSSL on AWS. Inside a corporate network, they can come
-  [from your own CA](docs/REFERENCE.md#tls-from-your-own-ca) instead.
+  GCP and ZeroSSL on AWS and bare metal. Inside a corporate network, they
+  can come [from your own CA](docs/REFERENCE.md#tls-from-your-own-ca)
+  instead.
 - **Private if you need it.** With [private ingress](docs/INSTALL.md#private-ingress-on-aws)
   on AWS, no node has a public IP and people reach the cluster over your VPN.
 - **Backups.** The installer creates a bucket for
@@ -76,6 +82,9 @@ signature against [`release-keys/`](release-keys) before it unpacks anything.
   tested. You don't need the boxd source tree.
 
 ## Quick start
+
+On GCP or AWS, below. On bare metal there is no cloud to sign in to and no
+bucket: follow [Install on bare metal](docs/INSTALL.md#install-on-bare-metal).
 
 1. **Sign in to your cloud.** Use `./boxd-install gcloud …` or
    `./boxd-install aws …`, which run the CLI in Docker. If you already have
@@ -118,7 +127,11 @@ put it in a file next to `cluster.toml` and run `apply` again.
 
 ## Limitations
 
-- **GCP and AWS only.** A cluster runs in one zone of one region.
+- **GCP, AWS or hosts you prepare.** On GCP and AWS a cluster runs in one
+  zone of one region. On [bare metal](docs/INSTALL.md#install-on-bare-metal)
+  the installer creates nothing: you provide Ubuntu 24.04 hosts with ssh, a
+  private network inside `10.0.0.0/8`, public IPs for the proxy and dns
+  nodes, and KVM and a data disk on workers.
 - **Workers need hardware virtualization.** On GCP, use N2 (recommended) or
   N1; AMD, Arm and E2 machines can't run VMs. On AWS, use C7i/M7i/R7i or
   C8i/M8i/R8i with nested virtualization, or any `*.metal` type. The guides
@@ -134,12 +147,12 @@ put it in a file next to `cluster.toml` and run `apply` again.
 
 | File | What it's for |
 |---|---|
-| [`docs/INSTALL.md`](docs/INSTALL.md) | the install, step by step, on GCP or AWS |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | the install, step by step, on GCP, AWS or bare metal |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | configuration, upgrades, day-2 operations, troubleshooting |
 | [`OPERATIONS.md`](OPERATIONS.md) | running the cluster day to day (`boxd-ctl`) |
 | [`INSTALL-PROMPT.md`](INSTALL-PROMPT.md) | the same install, with Claude Code |
 | [`CHANGELOG.md`](CHANGELOG.md) | what changed in each release of this repo |
-| `cluster.example.toml`, `examples/{gcp,aws}/cluster.toml` | your starting config; copy it to `cluster.toml`, which git ignores |
+| `cluster.example.toml`, `examples/{gcp,aws,metal}/cluster.toml` | your starting config; copy it to `cluster.toml`, which git ignores |
 | [`SECURITY.md`](SECURITY.md) | how to report a security problem |
 
 ## Contributing

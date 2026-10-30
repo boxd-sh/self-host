@@ -21,6 +21,8 @@ license.key
 # cluster.toml.
 /cluster.toml
 .env
+# [metal] clusters keep their encrypted state here: back it up, never commit it
+/metal-state/
 
 # certificates and keys you hand to `providers set-tls-ca` / `set-github-key`
 /*.pem

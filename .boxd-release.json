@@ -1,7 +1,7 @@
 {
-  "version": "v2026.10.29.3",
-  "installer_commit": "7218950567b5a6bae32bd9e328a635dbdad2d25a",
-  "released_at": "2026-10-29T20:14:06+00:00",
+  "version": "v2026.10.29.4",
+  "installer_commit": "2102e04213528d0da4c1ac97aab6fd74b36649f8",
+  "released_at": "2026-10-30T00:00:51+00:00",
   "assets_channel": "latest",
   "telemetry_default": true
 }

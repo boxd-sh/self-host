@@ -1,8 +1,9 @@
-# Install boxd on GCP or AWS
+# Install boxd on GCP, AWS or bare metal
 
 Read [Before you start](#before-you-start), then follow **one** walkthrough
-from top to bottom: [Install on GCP](#install-on-gcp) or
-[Install on AWS](#install-on-aws). Both end in
+from top to bottom: [Install on GCP](#install-on-gcp),
+[Install on AWS](#install-on-aws) or
+[Install on bare metal](#install-on-bare-metal). All three end in
 [After apply: delegate DNS and check](#after-apply-delegate-dns-and-check).
 Run every command from the root of this repository. Configuration, day-2
 operations and troubleshooting are in [REFERENCE.md](REFERENCE.md).
@@ -15,7 +16,8 @@ You need:
   Desktop). Nothing else: see [How `./boxd-install` works](#how-boxd-install-works).
 - **A cloud account** you can create networks, instances, IAM and buckets in:
   a GCP project with billing, or an AWS account. The walkthroughs check
-  permissions and quota first.
+  permissions and quota first. Or **hosts you already run**: see
+  [Install on bare metal](#install-on-bare-metal).
 - **A DNS zone you can delegate**, e.g. `boxd.example.com` under
   `example.com`: you must be able to add NS and A records in the parent zone
   at your DNS provider. The cluster runs the authoritative DNS for its zone.
@@ -548,6 +550,170 @@ Objects can't be read or deleted from your laptop any more. To empty a
 bucket before [Tearing down](REFERENCE.md#tearing-down), do it from a node
 ([SSH to nodes](REFERENCE.md#ssh-to-nodes), then `aws s3 rm --recursive`), or set
 `bucket_access = "anywhere"` and `apply` first.
+
+---
+
+## Install on bare metal
+
+Use this when you already run the hosts: your own servers, VMs on your own
+hypervisor, or instances in another cloud. The installer creates nothing
+here. You prepare the hosts and the network, list them in `cluster.toml`,
+and `apply` installs boxd on them over ssh. There is no terraform, no cloud
+account and no state bucket.
+
+Example names used below: cluster `mycluster`, zone `boxd.example.com`, a
+private network `10.60.0.0/24` on NIC `eno2`. Use your own.
+
+### 1. Prepare the hosts
+
+Every node needs:
+
+- **Ubuntu 24.04, x86_64.**
+- **A user `ubuntu` with passwordless sudo**, reachable over ssh from the
+  machine you install from. You add the installer's key in
+  [step 5](#5-apply).
+- **An address on one private network** shared by all nodes, inside
+  `10.0.0.0/8`, with all TCP and UDP open between the nodes and an MTU of at
+  least 1550 (VM traffic between hosts runs over VXLAN). The NIC on that
+  network must have the same name on every host.
+- **Outbound internet.** Each node downloads the boxd release from
+  `storage.googleapis.com` and packages from the Ubuntu, Docker and
+  ClickHouse repositories.
+
+Workers also need:
+
+- **Hardware virtualization**: `/dev/kvm` must exist. On a server, turn on
+  VT-x or AMD-V in the firmware. A worker that is itself a VM needs nested
+  virtualization.
+- **GRUB boot.** `apply` installs boxd's host kernel, makes it the GRUB
+  default and **reboots the worker** into it.
+- **A dedicated data disk** for VM data. `apply` **formats it as XFS**
+  unless it is XFS already, so everything on it is lost. It also puts a 64 GB
+  swap file on it.
+
+Proxy and dns nodes also need a **public IPv4** (1:1 NAT is fine), open from
+the internet on:
+
+| Node | Ports |
+|---|---|
+| proxy | TCP 80, 443, 9443, 10000–30000, 40000–60000 |
+| dns | TCP and UDP 53 |
+
+Port 22 stays your host's own sshd. The proxy takes per-VM SSH on
+10000–30000, HTTPS on 443, the API the CLI uses on 9443, and raw TCP ports
+on 40000–60000.
+
+**Use dedicated hosts.** Besides the kernel and the disk, `apply` installs
+Docker on workers, sets sysctls and transparent hugepages, adds iptables
+NAT and forwarding rules, a `boxd-br0` bridge and VXLAN interfaces, and runs
+ClickHouse on the metrics node. VMs get addresses from `bridge_subnet_base`
+(default `10.100.0.0/16`), which must not overlap a network your hosts
+route to.
+
+### 2. Secrets
+
+Create `~/.boxd-mycluster.env` as in [Your state key](#your-state-key),
+and `source` it.
+
+### 3. `cluster.toml`
+
+```sh
+cp examples/metal/cluster.toml cluster.toml
+```
+
+Change every value marked `CHANGE`: the cluster name, zone, `vpc_cidr` (your
+private network), `interface` (the NIC on it), the certificate contact
+email, and the nodes. Each node takes:
+
+| Key | |
+|---|---|
+| `internal_ip` | its address on the private network |
+| `public_ip` | proxy and dns nodes: the address clients and the glue records point at |
+| `ssh_host` | optional: where the installer connects. Default: `public_ip`, else `internal_ip` |
+| `data_disk` | workers: the data disk. Prefer a stable name from `/dev/disk/by-id/` over `/dev/sdb` |
+
+```toml
+[metal]
+vpc_cidr  = "10.60.0.0/24"
+interface = "eno2"
+
+[[nodes]]
+name        = "mycluster-control-0"
+roles       = ["control", "proxy", "console", "metrics", "dns:ns1"]
+internal_ip = "10.60.0.10"
+public_ip   = "203.0.113.10"
+
+[[nodes]]
+name        = "mycluster-worker-0"
+roles       = ["worker"]
+internal_ip = "10.60.0.20"
+ssh_host    = "203.0.113.20"
+data_disk   = "/dev/disk/by-id/nvme-SAMSUNG_MZQL23T8HCLS-00A07_S64HNE0T123456"
+```
+
+Then:
+
+```sh
+./boxd-install validate
+```
+
+Certificates come from ZeroSSL by default. Inside a corporate network they
+can come from [your own CA](REFERENCE.md#tls-from-your-own-ca) instead;
+`providers set-tls-ca` works the same here.
+
+### 4. Console sign-in
+
+Set up Google sign-in ([GCP step 6](#6-console-sign-in-google)), GitHub
+sign-in ([AWS step 6](#6-console-sign-in-github-or-google)) or
+[single sign-on](REFERENCE.md#single-sign-on-oidc), the same as on a
+cloud. Google sign-in needs a Google Cloud project for its OAuth client, not
+for the cluster.
+
+### 5. Apply
+
+```sh
+./boxd-install apply
+```
+
+The first time, `apply` makes the cluster's deploy key and stops before it
+changes anything, because no host accepts the key yet:
+
+```
+error: these hosts are not ready:
+  mycluster-control-0 (ubuntu@203.0.113.10): ssh failed: ubuntu@203.0.113.10: Permission denied (publickey).
+  mycluster-worker-0 (ubuntu@203.0.113.20): ssh failed: ubuntu@203.0.113.20: Permission denied (publickey).
+On every node, the user ubuntu needs passwordless sudo and this line in ~ubuntu/.ssh/authorized_keys (the cluster's deploy key):
+
+  ssh-ed25519 AAAA… boxd-deploy
+
+Then run apply again.
+```
+
+Add that line on every node, then run it again:
+
+```sh
+./boxd-install apply 2>&1 | tee apply.log
+```
+
+It checks ssh, sudo and `/dev/kvm` first, then: download and verify the
+assets → per-node configs → ansible (installs the boxd host kernel on
+workers, one reboot) → wait for the control plane → check workers
+registered → seed VM templates. It ends by printing the `Assets:` version it
+installed and the **glue records**. Without a license key it also counts the
+workers' CPUs and warns when they're over the free tier.
+
+**The state is a file.** Instead of a bucket, the encrypted state lives in
+`metal-state/<cluster>/installer-state.enc` next to `cluster.toml`, with a
+`.prev` copy beside it (`[metal] state_dir` moves it). It holds every key
+the cluster has, encrypted with `BOXD_STATE_KEY`. **Back it up**, and keep
+it with the state key: losing either loses the cluster's identity. Git
+ignores `metal-state/`. `state pull`, `state push` and `providers` work on
+it as they do on a bucket.
+
+`destroy` doesn't apply: the installer created no hosts. To remove boxd,
+reinstall the hosts.
+
+Continue with [After apply: delegate DNS and check](#after-apply-delegate-dns-and-check).
 
 ---
 

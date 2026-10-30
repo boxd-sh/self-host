@@ -1,5 +1,10 @@
 # Changelog
 
+## v2026.10.29.4
+
+- Ship the Boxd Binary License (LICENSE-BINARIES.md) (#32)
+- Bare metal: a [metal] adapter for hosts you already run (#31)
+
 ## v2026.10.29.3
 
 - README: a banner and the diagram in the boxd website's dark style

@@ -768,8 +768,10 @@ examples for each command.
 
 ### SSH to nodes
 
-There is no public SSH. The installer reaches nodes the same way you do:
-through GCP's IAP tunnel or AWS Systems Manager.
+On GCP and AWS there is no public SSH. The installer reaches nodes the same
+way you do: through GCP's IAP tunnel or AWS Systems Manager. On bare metal
+it connects directly, as `ubuntu`, to each node's `ssh_host` (or
+`public_ip`, else `internal_ip`); use your own access there.
 
 **GCP**, by node name:
 
@@ -976,7 +978,10 @@ data_disk_gb = 500
 boxd-ctl status                  # on a control node: the new worker should appear in the count
 ```
 
-Check your vCPU quota first. The same applies to an extra proxy or
+On bare metal, prepare the host first ([Install on bare metal](INSTALL.md#1-prepare-the-hosts))
+and give the node `data_disk` instead of `data_disk_gb`. Until the host has
+the deploy key, `apply` stops and prints the line to add, as on the first
+install. On the clouds, check your vCPU quota first. The same applies to an extra proxy or
 nameserver. Control nodes are the exception: they are raft voters, so keep
 the count odd (1, 3, 5) and add them one at a time.
 
@@ -1058,7 +1063,9 @@ lost or overwritten. If an `apply` can't push state back at the end, it keeps
 its copy in `./pulled-state` and tells you to push it.
 
 The encrypted state is `<cluster>/installer-state.enc` in the state bucket,
-with a `.prev` sibling and full bucket versioning behind it. Don't run two
+with a `.prev` sibling and full bucket versioning behind it. On bare metal
+it's the file `metal-state/<cluster>/installer-state.enc` next to
+`cluster.toml`, with only the `.prev` copy behind it: back it up. Don't run two
 applies concurrently — the last state push wins.
 
 ### Tearing down
@@ -1066,6 +1073,10 @@ applies concurrently — the last state push wins.
 ```sh
 ./boxd-install destroy
 ```
+
+On bare metal there is nothing to destroy, and `destroy` says so: reinstall
+the hosts, then delete `metal-state/<cluster>/` and do steps 1, 2 and 4
+below.
 
 This destroys the cloud infrastructure. The encrypted state stays in the
 bucket, so a later `apply` rebuilds the same cluster identity: the same

@@ -1,0 +1,170 @@
+# boxd self-host on bare metal, or on hosts you already run — cluster.toml
+#
+# Copy this file to cluster.toml at the root of the installer and work
+# through it top to bottom:
+#
+#   1. YOUR CLUSTER   — values you must change (marked CHANGE)
+#   2. NODES          — your hosts and their addresses
+#   3. OPTIONAL       — your own CA, machine sizes, single sign-on
+#   4. LEAVE AS IS    — service settings; only change these if boxd asks you to
+#
+# Then check it, before anything touches your hosts:
+#
+#   ./boxd-install validate
+#
+# Secrets never go in this file (OAuth clients, API keys): see
+# docs/INSTALL.md "Install on bare metal" (`./boxd-install providers edit`).
+#
+# The installer creates nothing here: no network, no firewall, no hosts. It
+# reaches every node over ssh as `ubuntu` with its deploy key and installs
+# boxd on it. docs/INSTALL.md "Install on bare metal" lists what each host
+# needs first.
+
+# ============================================================ 1. YOUR CLUSTER
+
+[cluster]
+# CHANGE. Lowercase letters, digits and dashes.
+name = "boxd-metal"
+# CHANGE. The DNS zone the cluster serves, e.g. boxd.yourcompany.com. You
+# delegate it from its parent zone (NS + glue records) after the first apply.
+zone = "boxd.example.com"
+# The boxd release to install. "latest" follows the newest release boxd
+# publishes (resolved on every apply). To stay on one
+# release, put the 40-character version id the installer prints here.
+assets_version = "latest"
+# Optional. The name of the cluster's organization, the one everyone who
+# signs in joins. Without it: "<First name>'s default org".
+# org_name = "Your Company"
+
+[metal]
+# CHANGE. The private network every node has an address on (internal_ip
+# below). It must be inside 10.0.0.0/8.
+vpc_cidr  = "10.60.0.0/24"
+# CHANGE. The name of each host's NIC on that network, e.g. "eno2" or a VLAN
+# interface such as "eno2.2000". The same on every host.
+interface = "eno2"
+# Where the installer keeps the cluster's state, encrypted with
+# BOXD_STATE_KEY: <state_dir>/<cluster name>/installer-state.enc, next to
+# this file. Back it up; it holds every key the cluster has.
+# state_dir = "metal-state"
+
+[acme]
+# CHANGE. Where the certificate authority (ZeroSSL) sends expiry notices.
+contact_email = "ops@example.com"
+
+[license]
+# Optional. The file with your boxd license key, next to this one (it is
+# git-ignored). Without a key the cluster has the boxd free tier: up to 16
+# worker vCPUs (the logical CPUs of the worker hosts). README "License key".
+# key_file = "license.key"
+
+[telemetry]
+# The cluster sends boxd one usage report an hour: counts only, no personal
+# data. Only a license key with telemetry opt-out can turn it off (false,
+# with [license] key_file); the free tier always sends. README "Telemetry".
+# enabled = false
+
+# ==================================================================== 2. NODES
+#
+# Roles: control (keeps cluster state; use 1 or 3), worker (runs the VMs),
+# proxy (public SSH/HTTPS entry), console (web UI), metrics (usage graphs),
+# dns:ns1 (authoritative DNS for your zone). Roles can share a node.
+#
+# Per node:
+#   internal_ip  its address on the private network (vpc_cidr)
+#   public_ip    proxy and dns nodes: the public address clients and the
+#                DNS glue records point at
+#   ssh_host     optional: where the installer connects. Default: public_ip,
+#                else internal_ip
+#   data_disk    workers: the disk VM data lives on. apply FORMATS it as XFS
+#                unless it is XFS already. Use a stable name from
+#                /dev/disk/by-id/ where you can.
+#
+# Never rename a node after the first apply: its name is its identity.
+
+[[nodes]]
+name        = "boxd-metal-control-0"
+roles       = ["control", "proxy", "console", "metrics", "dns:ns1"]
+internal_ip = "10.60.0.10"
+public_ip   = "203.0.113.10"             # CHANGE
+
+[[nodes]]
+name        = "boxd-metal-worker-0"
+roles       = ["worker"]
+internal_ip = "10.60.0.20"
+ssh_host    = "203.0.113.20"             # CHANGE, or remove to connect to internal_ip
+data_disk   = "/dev/nvme1n1"             # CHANGE
+
+# ================================================================= 3. OPTIONAL
+#
+# Your own CA — inside a corporate network, sign certificates with your own
+# intermediate CA (README "TLS from your own CA"). Store it with
+# `./boxd-install providers set-tls-ca <cert.pem> <key.pem>`, then replace
+# contact_email under [acme] with:
+#   ca = "local"
+#   dns_verify_resolver = "10.0.0.2"     # your internal resolver
+
+# Machine sizes your users can pick. Without this table: 1 vCPU · 4 GiB,
+# 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are
+# removed on the next apply), so list every size you want.
+# [templates]
+# sizes = [
+#     { vcpu = 1, memory_gb = 4 },
+#     { vcpu = 2, memory_gb = 8 },
+#     { vcpu = 4, memory_gb = 16 },
+# ]
+
+# Single sign-on through your company's OpenID Connect provider (README
+# "Single sign-on"). The client secret goes in the providers config.
+# [oidc]
+# issuer = "https://login.microsoftonline.com/<tenant-id>/v2.0"
+# client_id = "…"
+# display_name = "Contoso"
+# bootstrap_admin = "you@yourcompany.com"
+
+# ============================================================== 4. LEAVE AS IS
+
+[network]
+vni_range_start    = 100
+vni_range_end      = 10000
+bridge_subnet_base = "10.100.0.0"
+
+[control]
+socket_path = "/run/boxd/control.sock"
+default_auto_suspend_secs = 900          # idle VMs suspend after 15 min
+default_auto_hibernate_secs = 1800
+
+[worker]
+warm_slots = 2
+# true lets the VMs your users run start VMs of their own (KVM inside a boxd
+# VM). That is separate from the nested virtualization the installer turns on
+# for the worker instance itself, which is always on. Leave it off unless
+# users need it: it only performs well on *.metal workers, and it widens the
+# KVM attack surface for every VM on the host.
+nested_virt = false
+# TC filters on each VM's network interface. "full" (the default) compiles
+# per-VM eBPF programs with LLVM, which keeps VMs of different orgs apart on
+# the network but is slow on some CPUs. "anti-spoof" skips LLVM: VMs still
+# can't fake their MAC or IP, and only boxd itself can reach the in-VM agent
+# port (57073), but VMs reach each other on every other port, across orgs.
+# Use it only on single-tenant installs. A [[nodes]] entry can set it per
+# worker. Needs boxd assets that include it; older ones ignore the key.
+# tc_filters = "full"
+
+[proxy]
+ssh_port = 2222
+http_port = 80
+https_port = 443
+api_port = 9443
+host_key = "/etc/boxd/tls/proxy_host_ed25519"
+
+[dns]
+listen = "0.0.0.0:53"
+alias_zones = []
+
+[names]
+reserved = [
+    "api", "app", "www", "mail", "git", "ssh", "proxy", "ns1", "ns2",
+    "console", "connect", "docs", "help", "support", "status", "admin",
+    "grafana",
+]

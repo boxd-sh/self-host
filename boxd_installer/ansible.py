@@ -1,5 +1,6 @@
 """Converge via the vendored ansible tree, and post-install steps over ssh
-(through the same tunnel ansible uses: IAP on GCP, SSM on AWS)."""
+(through the same tunnel ansible uses: IAP on GCP, SSM on AWS; direct on
+metal)."""
 import atexit
 import json
 import os
@@ -98,6 +99,33 @@ def node_assets_vars(sha: str, assets_root: str) -> dict:
             "boxd_asset_hashes": {rel: h for rel, h in files.items()
                                   if rel.startswith(NODE_ASSET_DIRS)}}
 
+def check_hosts(cfg, deploy_pubkey: str) -> None:
+    """Given hosts (metal): one quick try per node, before anything is
+    downloaded. The first apply on a new cluster stops here, because the
+    deploy key it just made is on no host yet; the error says what to add."""
+    failed = []
+    for node in cfg.nodes:
+        check = "sudo -n true" + (" && test -c /dev/kvm" if node.has("worker") else "")
+        res = _ssh(cfg, node, check, check=False, capture=True, quiet=True)
+        if res.returncode == 0:
+            log(f"{node.name}: ssh, sudo" + (" and /dev/kvm" if node.has("worker") else "") + " ok")
+            continue
+        why = (res.stderr or "").strip().splitlines()
+        if res.returncode == 255:
+            failed.append(f"{node.name} ({_target(cfg, node)}): ssh failed: "
+                          f"{why[-1] if why else 'no reason given'}")
+        elif node.has("worker"):
+            failed.append(f"{node.name}: ubuntu has no passwordless sudo, or there is no "
+                          "/dev/kvm (turn on VT-x/AMD-V in the firmware)")
+        else:
+            failed.append(f"{node.name}: ubuntu has no passwordless sudo")
+    if failed:
+        raise InstallError(
+            "these hosts are not ready:\n  " + "\n  ".join(failed) + "\n"
+            "On every node, the user ubuntu needs passwordless sudo and this line in "
+            "~ubuntu/.ssh/authorized_keys (the cluster's deploy key):\n\n"
+            f"  {deploy_pubkey}\n\nThen run apply again.")
+
 def _ssh(cfg, node, command: str, **kw):
     """Run one command on a node over a per-node master connection, so the
     tunnel (an SSM session on AWS, seconds to open) is set up once rather
@@ -136,12 +164,21 @@ def _ssh_opts(cfg) -> list[str]:
     proxy_cmd = clouds.get(cfg).ssh_proxy_command(cfg)
     if _keys_dir is None:
         raise InstallError("ansible.set_keys_dir() not called before ssh use")
-    return ["-o", f"ProxyCommand={proxy_cmd}",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-o", "ConnectTimeout=30",
-            "-i", os.path.join(_keys_dir, "boxd-deploy")]
+    tunnel = ["-o", f"ProxyCommand={proxy_cmd}"] if proxy_cmd else []
+    return tunnel + ["-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null",
+                     "-o", "LogLevel=ERROR",
+                     "-o", "ConnectTimeout=30",
+                     "-i", os.path.join(_keys_dir, "boxd-deploy")]
+
+def worker_vcpus(cfg) -> dict[str, int]:
+    """Each worker's logical CPUs, what the free tier counts. For hosts
+    without a machine type (metal)."""
+    out = {}
+    for n in cfg.nodes_with("worker"):
+        res = _ssh(cfg, n, "nproc", capture=True, quiet=True)
+        out[n.name] = int(res.stdout.strip())
+    return out
 
 def ctl(cfg, command: str, check: bool = True, quiet: bool = False):
     """Run boxd-ctl on ONE control node (parallel connections trip its rate limit)."""
