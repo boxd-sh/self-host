@@ -19,6 +19,12 @@ node). Roles can share a node.
 - **Machine types** have defaults per role. `machine_type` and `boot_disk_gb`
   are per-node overrides. Workers must set `data_disk_gb`, because VM disks
   live there.
+- **The network interface** boxd uses on the private network is, on each
+  node, the device that holds its `internal_ip`, read from the host at every
+  apply: instance types name it differently (AWS: `ens5`, `enp39s0` on m8i;
+  GCP: `ens4`, `ens3` with gVNIC). `interface` under `[aws]` or `[gcp]` sets
+  one name for every node instead; on bare metal it is required. A rendered
+  config (`render`) shows `@boxd_node_interface@` where each node's name goes.
 - **Nameservers:** the examples have one (`dns:ns1`). For redundancy, give a
   second node `dns:ns2`; `apply` then prints glue records for both. Today the
   zone's own NS answer always lists `ns1` and `ns2`, even with one

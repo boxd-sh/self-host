@@ -104,7 +104,9 @@ class MetalRender(unittest.TestCase):
         self.assertIn("boxd-metal-worker-0: { ansible_host: 203.0.113.20, "
                       "boxd_volume_device: /dev/nvme1n1,", inv)
         gv = r.group_vars()
-        self.assertIn("vrack_interface: eno2", gv)
+        # [metal].interface is required: one name for every node.
+        self.assertIn("boxd_node_interface: eno2", gv)
+        self.assertIn('vrack_interface: "{{ boxd_node_interface }}"', gv)
 
     def test_ssh_target_falls_back_to_internal_ip(self):
         doc = metal_doc()

@@ -23,9 +23,12 @@
     owner: root
     group: root
 
+# The rendered file with this node's NIC in place of the placeholder
+# (render.IFACE_PLACEHOLDER, boxd-common's boxd_node_interface). A lookup's
+# result is never templated again, so the file's text goes over as it is.
 - name: "Copy {{ boxd_role_name }} config"
   copy:
-    src: "{{ boxd_config_local_dir }}/{{ inventory_hostname }}/{{ boxd_role_name }}.toml"
+    content: "{{ lookup('file', boxd_config_local_dir ~ '/' ~ inventory_hostname ~ '/' ~ boxd_role_name ~ '.toml', rstrip=False) | replace('@boxd_node_interface@', boxd_node_interface) }}"
     dest: "{{ boxd_config_dir }}/{{ boxd_role_name }}.toml"
     owner: "{{ boxd_user }}"
     group: "{{ boxd_group }}"

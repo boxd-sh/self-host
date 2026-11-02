@@ -109,7 +109,8 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 # Or use ZeroSSL instead of Google Trust Services: ca = "zerossl".
 #
 # Under [gcp]: auto_backups = false turns off the backups bucket the
-# installer creates; interface = "ens4" sets the NIC name.
+# installer creates; interface = "ens4" sets the NIC name (default: on each
+# node, the device that holds its internal_ip).
 
 # Machine sizes your users can pick. Without this table: 1 vCPU · 4 GiB,
 # 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are

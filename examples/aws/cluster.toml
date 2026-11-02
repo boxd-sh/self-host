@@ -125,7 +125,9 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 #   bucket_access = "vpc"
 #
 # Under [aws] you can also pin an AMI (ami = "ami-…"; default: Canonical's
-# current Ubuntu 24.04) or the NIC name (interface = "ens5").
+# current Ubuntu 24.04) or the NIC name (interface = "ens5"; default: on each
+# node, the device that holds its internal_ip, as instance types name it
+# differently: ens5, enp39s0 on m8i).
 
 # Machine sizes your users can pick. Without this table: 1 vCPU · 4 GiB,
 # 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are

@@ -100,7 +100,8 @@ class Config:
         self.network: dict = doc["network"]
         self.nodes: list[Node] = [Node(n) for n in doc["nodes"]]
         mod = clouds.CLOUDS[self.cloud_name]
-        self.interface: str = self.cloud.get("interface", mod.DEFAULT_INTERFACE)
+        # None: each host's own NIC, found by ansible (render.IFACE_PLACEHOLDER).
+        self.interface: str | None = self.cloud.get("interface", mod.DEFAULT_INTERFACE)
         self.acme_ca: str = doc.get("acme", {}).get("ca", mod.DEFAULT_CA)
         # "private": proxy/dns get no public IP and advertise their internal
         # ones (AWS only; clients come in over Twingate or similar).

@@ -6,7 +6,9 @@ import os
 from ..util import InstallError, run
 
 REQUIRED = ("project", "region", "zone", "vpc_cidr", "image_family", "state_bucket")
-DEFAULT_INTERFACE = "ens4"
+# None: read from each host, as on AWS (gVNIC machine types name it ens3 or
+# enp0s3 rather than ens4).
+DEFAULT_INTERFACE = None
 DEFAULT_CA = "gts"
 TF_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "terraform", "gcp"))
 SSH_PATH = "IAP"
