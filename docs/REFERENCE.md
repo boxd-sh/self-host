@@ -1073,6 +1073,18 @@ it's the file `metal-state/<cluster>/installer-state.enc` next to
 `cluster.toml`, with only the `.prev` copy behind it: back it up. Don't run two
 applies concurrently — the last state push wins.
 
+**The egress CA.** Every worker signs the HTTPS its machines send through
+boxd's egress proxy with one CA, which each machine installs in its trust
+store when it boots. The state keeps the cluster's pair (`keys/egress-ca.pem`,
+`keys/egress-ca.key`), made at the first apply, and every `worker.toml` (mode
+0600) carries it as `egress_ca_cert` / `egress_ca_key`. So a machine that moves
+to another worker (a live migration, a relocated wake, a restore) keeps
+trusting it. It is never replaced. A cluster applied before this release has
+none in its state, and each worker made its own: the next apply adopts the
+first worker's pair it finds under `/mnt/boxd-data/egress-ca/` and says so.
+Machines on the other workers get it at their next boot, restore or fork, and
+their HTTPS through the egress proxy fails until then.
+
 ### Tearing down
 
 ```sh

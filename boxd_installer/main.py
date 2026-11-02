@@ -9,7 +9,7 @@ import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
                oidc, remote_state, render, telemetry, tf)
-from .state import State
+from .state import State, generate_egress_ca
 from .util import InstallError, log
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,6 +108,7 @@ def _apply(cfg, args) -> int:
                                       if cfg.table(t)}):
         log(f"warning: {inert}")
     composio.sync_auth_configs(cfg, state, assets_root)
+    ensure_egress_ca(cfg, state)
     alloc = state.allocate(cfg)
     r = render.Renderer(cfg, alloc, tf_out, state, assets_root=assets_root)
     _write_out(r.render_all(), args.out_dir)
@@ -173,6 +174,25 @@ def _apply(cfg, args) -> int:
             "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
             "  ./boxd-install state reset-eab\n  ./boxd-install apply")
     return 0
+
+def ensure_egress_ca(cfg, state) -> None:
+    """One egress CA for the cluster, in state, before the render ships it to
+    every worker. A cluster applied before this release has none in state but
+    workers that made their own: adopt the first one found, so its machines
+    keep trusting it. Otherwise make one."""
+    if state.egress_ca() is not None or not cfg.nodes_with("worker"):
+        return
+    found = ansible.worker_egress_ca(cfg) if state.data.get("applied_assets") else None
+    if found:
+        name, cert, key = found
+        state.store_egress_ca(cert, key)
+        others = [n.name for n in cfg.nodes_with("worker") if n.name != name]
+        log(f"egress CA: adopted {name}'s own pair for the whole cluster"
+            + (f"; machines on {', '.join(others)} get it at their next boot, restore or "
+               "fork (until then their HTTPS through the egress proxy fails)" if others else ""))
+    else:
+        state.store_egress_ca(*generate_egress_ca())
+        log("egress CA: made one for the cluster")
 
 def cmd_destroy(args) -> int:
     cfg = config.load(args.cluster)

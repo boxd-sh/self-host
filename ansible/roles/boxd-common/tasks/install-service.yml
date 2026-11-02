@@ -29,7 +29,8 @@
     dest: "{{ boxd_config_dir }}/{{ boxd_role_name }}.toml"
     owner: "{{ boxd_user }}"
     group: "{{ boxd_group }}"
-    mode: "0640"
+    # worker.toml holds the egress CA key: 0600 (boxd_config_mode).
+    mode: "{{ boxd_config_mode | default('0640') }}"
   notify: restart boxd service
 
 - name: "Install {{ boxd_service }} systemd unit"

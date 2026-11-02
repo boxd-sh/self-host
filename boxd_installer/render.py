@@ -313,6 +313,11 @@ class Renderer:
 
     def worker_doc(self, node) -> dict:
         doc = self._base(node, "worker")
+        # One egress CA for every worker, inline PEM like boxd's
+        # own deploys. Absent (a render before the first apply made one):
+        # the worker makes its own, as before.
+        if pair := self.state.egress_ca():
+            doc["egress_ca_cert"], doc["egress_ca_key"] = pair
         doc["network"]["bridge_subnet"] = self.alloc.bridge_subnet(node.name)
         doc["paths"] = {"run_dir": "/run/boxd", "data_dir": "/mnt/boxd-data", "log_dir": "/var/log/boxd"}
         worker = dict(self.cfg.table("worker"))

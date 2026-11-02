@@ -67,6 +67,7 @@
     boxd_binary: boxd-worker
     boxd_service: boxd-worker
     boxd_role_name: worker
+    boxd_config_mode: "0600"
 
 - name: Install worker dependencies
   apt:

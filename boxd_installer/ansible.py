@@ -171,6 +171,28 @@ def _ssh_opts(cfg) -> list[str]:
                      "-o", "ConnectTimeout=30",
                      "-i", os.path.join(_keys_dir, "boxd-deploy")]
 
+# Where a worker without a configured egress CA keeps the pair it made itself
+# (boxd-worker: <[paths] data_dir>/egress-ca; render.worker_doc's data_dir).
+WORKER_EGRESS_CA_DIR = "/mnt/boxd-data/egress-ca"
+
+def worker_egress_ca(cfg) -> tuple[str, str, str] | None:
+    """(worker name, cert PEM, key PEM) of the first worker that made its own
+    egress CA, or None. A cluster from before the installer shipped one: its
+    machines trust their worker's pair, so adopting one keeps that worker's
+    machines working (the others' re-fetch the CA at their next boot,
+    restore or fork)."""
+    for node in cfg.nodes_with("worker"):
+        got = []
+        for f in ("egress-ca.pem", "egress-ca.key"):
+            res = _ssh(cfg, node, f"sudo cat {WORKER_EGRESS_CA_DIR}/{f}",
+                       capture=True, check=False, quiet=True)
+            if res.returncode != 0 or "-----BEGIN" not in (res.stdout or ""):
+                break
+            got.append(res.stdout)
+        if len(got) == 2:
+            return node.name, got[0], got[1]
+    return None
+
 def worker_vcpus(cfg) -> dict[str, int]:
     """Each worker's logical CPUs, what the free tier counts. For hosts
     without a machine type (metal)."""

@@ -85,6 +85,7 @@ class FakeState:
     def deploy_pubkey(self): return "ssh-ed25519 AAAA"
     def acme_eab(self, ca, project, email): return {"kid": "k", "hmac": "h"}
     def clickhouse_password(self): return "pw"
+    def egress_ca(self): return None
 
 class RenderMachineSizes(unittest.TestCase):
     """Sizes are cluster state (`boxd-ctl machine-sizes set`, see

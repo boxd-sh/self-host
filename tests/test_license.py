@@ -468,7 +468,7 @@ class ApplyOrder(LicenseCluster):
                                  instance_types=mock.Mock(return_value=existing)), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=calls.converge, wait_for_leader=mock.DEFAULT,
+                                 converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT,
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
