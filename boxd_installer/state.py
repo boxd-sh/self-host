@@ -11,6 +11,38 @@ import secrets as pysecrets
 from .util import InstallError, run
 
 ROLE_ID_ORDER = ["control", "worker", "proxy", "dns", "console", "metrics"]
+# The cluster's egress CA in keys/ (State.egress_ca); the same names boxd
+# gives a worker's own pair under its data dir (boxd_egress::ca).
+EGRESS_CA_CERT = "egress-ca.pem"
+EGRESS_CA_KEY = "egress-ca.key"
+
+def generate_egress_ca() -> tuple[str, str]:
+    """A self-signed CA for boxd's egress proxy: P-256, basicConstraints
+    CA:TRUE (boxd refuses a configured cert without it), the key as PKCS#8
+    (what rcgen's KeyPair::from_pem reads). 100 years, as rcgen's default for
+    the pair a worker makes itself: guests install it once, at boot."""
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("openssl"):
+        raise InstallError("openssl not found on PATH (needed to make the egress CA)")
+    d = tempfile.mkdtemp(prefix="boxd-egress-ca-")
+    try:
+        key, cert = os.path.join(d, "ca.key"), os.path.join(d, "ca.pem")
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+                        "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", key,
+                        "-out", cert, "-days", "36500", "-subj", "/CN=boxd egress CA",
+                        "-addext", "basicConstraints=critical,CA:TRUE",
+                        "-addext", "keyUsage=critical,keyCertSign,cRLSign"],
+                       check=True, capture_output=True)
+        pkcs8 = subprocess.run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", key],
+                               check=True, capture_output=True, text=True).stdout
+        with open(cert) as fh:
+            return fh.read(), pkcs8
+    except subprocess.CalledProcessError as e:
+        raise InstallError(f"making the egress CA failed: {e.stderr!r}") from None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 RAFT_PORT = {"control": 7000, "worker": 7000, "proxy": 7001, "dns": 7002}
 
 class State:
@@ -44,7 +76,9 @@ class State:
         bridges: dict = self.data.setdefault("bridge_indexes", {})
         next_vni = max([cfg.network["vni_range_start"] - 1] + list(vnis.values())) + 1
         next_bridge = max([-1] + list(bridges.values())) + 1
-        for node in cfg.nodes_with("worker"):
+        # Routed: one pool, no per-worker VNI or /16 (those of a cluster that
+        # was bridge stay, unused, so going back keeps the old addresses).
+        for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
             if node.name not in vnis:
                 vnis[node.name] = next_vni
                 next_vni += 1
@@ -141,6 +175,31 @@ class State:
                  "-keyout", os.path.join(self.keys_dir, "wildcard.key"),
                  "-out", pem, "-days", "365",
                  "-subj", "/CN=bootstrap.invalid"])
+
+    def egress_ca(self) -> tuple[str, str] | None:
+        """The cluster's egress CA pair (cert PEM, key PEM), or None before
+        apply made or adopted one (ensure_egress_ca). Every worker gets the
+        same pair (worker.toml egress_ca_cert / egress_ca_key): a machine
+        that moves to another worker keeps trusting the leaves its egress
+        proxy mints."""
+        paths = [os.path.join(self.keys_dir, f) for f in (EGRESS_CA_CERT, EGRESS_CA_KEY)]
+        if not all(os.path.exists(p) for p in paths):
+            return None
+        out = []
+        for p in paths:
+            with open(p) as fh:
+                out.append(fh.read())
+        return out[0], out[1]
+
+    def store_egress_ca(self, cert: str, key: str) -> None:
+        """Keep a pair; never replaces one (guests trust it from their boot)."""
+        if self.egress_ca() is not None:
+            raise InstallError("an egress CA is already in state; it is never replaced")
+        for name, value in ((EGRESS_CA_KEY, key), (EGRESS_CA_CERT, cert)):
+            fd = os.open(os.path.join(self.keys_dir, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                         0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(value if value.endswith("\n") else value + "\n")
 
     def deploy_pubkey(self) -> str:
         path = os.path.join(self.keys_dir, "boxd-deploy.pub")

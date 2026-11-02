@@ -171,6 +171,55 @@ def _ssh_opts(cfg) -> list[str]:
                      "-o", "ConnectTimeout=30",
                      "-i", os.path.join(_keys_dir, "boxd-deploy")]
 
+def deployed_network_modes(cfg) -> dict[str, str]:
+    """Each worker's [network] mode as its /etc/boxd/worker.toml has it
+    ("bridge" when the file names none); workers without the file (new ones)
+    are left out. Read and parsed here, so nothing on the host needs to."""
+    import tomllib
+    out = {}
+    for node in cfg.nodes_with("worker"):
+        res = _ssh(cfg, node, "sudo cat /etc/boxd/worker.toml",
+                   capture=True, check=False, quiet=True)
+        if res.returncode != 0:
+            continue
+        try:
+            doc = tomllib.loads(res.stdout)
+        except tomllib.TOMLDecodeError:
+            continue
+        out[node.name] = doc.get("network", {}).get("mode", "bridge")
+    return out
+
+def machine_count(cfg) -> int:
+    """The machines `boxd-ctl vm list` shows: "no vms", or a header line and
+    one line each."""
+    out = ctl(cfg, "vm list", quiet=True).stdout or ""
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines or lines[0].strip() == "no vms":
+        return 0
+    return len(lines) - 1
+
+# Where a worker without a configured egress CA keeps the pair it made itself
+# (boxd-worker: <[paths] data_dir>/egress-ca; render.worker_doc's data_dir).
+WORKER_EGRESS_CA_DIR = "/mnt/boxd-data/egress-ca"
+
+def worker_egress_ca(cfg) -> tuple[str, str, str] | None:
+    """(worker name, cert PEM, key PEM) of the first worker that made its own
+    egress CA, or None. A cluster from before the installer shipped one: its
+    machines trust their worker's pair, so adopting one keeps that worker's
+    machines working (the others' re-fetch the CA at their next boot,
+    restore or fork)."""
+    for node in cfg.nodes_with("worker"):
+        got = []
+        for f in ("egress-ca.pem", "egress-ca.key"):
+            res = _ssh(cfg, node, f"sudo cat {WORKER_EGRESS_CA_DIR}/{f}",
+                       capture=True, check=False, quiet=True)
+            if res.returncode != 0 or "-----BEGIN" not in (res.stdout or ""):
+                break
+            got.append(res.stdout)
+        if len(got) == 2:
+            return node.name, got[0], got[1]
+    return None
+
 def worker_vcpus(cfg) -> dict[str, int]:
     """Each worker's logical CPUs, what the free tier counts. For hosts
     without a machine type (metal)."""
@@ -216,6 +265,45 @@ def wait_for_leader(cfg, timeout: int = 300) -> None:
             return
         time.sleep(10)
     raise InstallError(f"no raft leader within {timeout}s — check boxd-control logs")
+
+def _is_leader(status_out: str) -> bool:
+    """`boxd-ctl status` run ON the leader says so on its first line:
+    `Leader: node 1 (10.70.1.10:7000) — this node`."""
+    import re
+    return re.search(r"^Leader:.*\bthis node\b", status_out, re.M) is not None
+
+def leader_node(cfg, timeout: int = 120):
+    """The control node that is the raft leader, or InstallError. Retried: a
+    restarted boxd-control may still be electing right after wait_for_leader
+    saw a leader through another node."""
+    deadline = time.time() + timeout
+    while True:
+        for node in cfg.nodes_with("control"):
+            res = _ssh(cfg, node, "sudo boxd-ctl status", capture=True, check=False, quiet=True)
+            if res.returncode == 0 and _is_leader(res.stdout):
+                return node
+        if time.time() >= deadline:
+            raise InstallError(f"no control node says it is the raft leader within {timeout}s "
+                               "— run `boxd-ctl status` on each control node")
+        time.sleep(10)
+
+def sync_config(cfg) -> list[str]:
+    """Add the learners new to the config (a worker, proxy or dns node added
+    to cluster.toml) to the running raft cluster. A running cluster never
+    reads them from the config by itself: the leader proposes them only on
+    `boxd-ctl sync-config`, and until then the new node logs "still not
+    registered: not the leader". On the leader only. Idempotent: with nothing
+    new it prints "No new learners to add" (members are re-proposed, a raft
+    no-op). Returns the "Added …" lines."""
+    leader = leader_node(cfg)
+    res = _ssh(cfg, leader, "sudo boxd-ctl sync-config", capture=True, check=False, quiet=True)
+    if res.returncode != 0:
+        raise InstallError(f"`boxd-ctl sync-config` on {leader.name} failed:\n"
+                           f"{((res.stderr or '') + (res.stdout or '')).strip()[-800:]}")
+    added = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.startswith("Added ")]
+    for line in added:
+        log(f"raft membership: {line}")
+    return added
 
 _LEARNER_UNITS = (("worker", "boxd-worker"), ("proxy", "boxd-proxy"), ("dns", "boxd-dns"))
 

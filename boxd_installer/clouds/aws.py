@@ -9,7 +9,13 @@ from ..util import InstallError, run
 
 REQUIRED = ("region", "availability_zone", "vpc_cidr", "public_subnet_cidr",
             "private_subnet_cidr", "state_bucket")
-DEFAULT_INTERFACE = "ens5"
+# None: the NIC is read from each host (the device holding its internal_ip;
+# render.IFACE_PLACEHOLDER). AWS names it ens5 on some instance types and
+# enp39s0 on others (m8i), so no one name is right.
+DEFAULT_INTERFACE = None
+# [network] guest_mtu in routed mode when cluster.toml sets none: 0, the
+# guest's own 1500. The VPC carries 9001, so Geneve's 50 bytes fit.
+ROUTED_GUEST_MTU = 0
 DEFAULT_CA = "zerossl"
 INGRESS_MODES = ("public", "private")
 BUCKET_ACCESS = ("anywhere", "vpc")

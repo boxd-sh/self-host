@@ -1,0 +1,48 @@
+---
+# Routed networking: the proxy binary makes geneve0, boxd0 (its host address
+# in the pool) and the pool's route at its start, and loads the routed
+# datapath (its unit gets the capabilities for that: boxd.service.j2). No
+# VXLAN tunnels to workers. A proxy that was a bridge proxy has its tunnels,
+# their unit and script removed here: a tunnel's address on the pool would
+# shadow the pool's route through boxd0.
+
+- name: Allow Geneve from the private network
+  iptables:
+    chain: INPUT
+    in_interface: "{{ vrack_interface }}"
+    protocol: udp
+    destination_port: "6081"
+    jump: ACCEPT
+    state: present
+
+- name: Stop the bridge-mode VXLAN unit
+  systemd:
+    name: boxd-vxlan
+    enabled: false
+    state: stopped
+  failed_when: false
+
+- name: Remove the bridge-mode VXLAN unit and script
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/boxd-vxlan.service
+    - /usr/local/bin/boxd-vxlan.sh
+
+- name: Delete the VXLAN tunnels to workers
+  shell: |
+    for d in $(ls /sys/class/net | grep -E '^vxlan[0-9]+$'); do
+      ip link del "$d" && echo "deleted $d"
+    done
+    true
+  register: old_proxy_vxlan
+  changed_when: "'deleted' in old_proxy_vxlan.stdout"
+
+# A drop-in that gave a routed proxy these capabilities by hand, before the
+# unit carried them: the unit has them now.
+- name: Remove a hand-made routed capabilities drop-in
+  file:
+    path: /etc/systemd/system/boxd-proxy.service.d/routed.conf
+    state: absent
+  notify: reload systemd

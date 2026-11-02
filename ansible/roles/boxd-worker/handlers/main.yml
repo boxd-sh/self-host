@@ -2,6 +2,16 @@
   systemd:
     daemon_reload: true
 
+# Re-runs the oneshot's ExecStart: one atomic nft batch replaces the tables,
+# so guests are never unfiltered (the unit has no ExecStop). Before the
+# worker's restart (handlers run in this order): the worker's ExecStartPre
+# checks the ruleset it is about to run under.
+- name: reapply guest firewall
+  systemd:
+    name: boxd-guest-fw
+    state: restarted
+    daemon_reload: true
+
 - name: restart boxd service
   systemd:
     name: boxd-worker

@@ -6,7 +6,14 @@ import os
 from ..util import InstallError, run
 
 REQUIRED = ("project", "region", "zone", "vpc_cidr", "image_family", "state_bucket")
-DEFAULT_INTERFACE = "ens4"
+# None: read from each host, as on AWS (gVNIC machine types name it ens3 or
+# enp0s3 rather than ens4).
+DEFAULT_INTERFACE = None
+# [network] guest_mtu in routed mode when cluster.toml sets none: 0, the
+# guest's own 1500. The VPC terraform makes carries 8896 (terraform/gcp
+# var.mtu), so Geneve's 50 bytes fit. (On a VPC left at GCP's 1460 it would
+# be 1410: set guest_mtu.)
+ROUTED_GUEST_MTU = 0
 DEFAULT_CA = "gts"
 TF_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "terraform", "gcp"))
 SSH_PATH = "IAP"

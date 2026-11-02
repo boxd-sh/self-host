@@ -1,3 +1,26 @@
+# The NIC on the cluster's private network: cluster.toml's interface when set
+# (group_vars boxd_node_interface), else the device that holds this node's
+# internal_ip. Rendered TOMLs say @boxd_node_interface@ until install-service
+# copies them with this name in.
+- name: Find the NIC that holds this node's internal IP
+  command: ip -o -4 addr show to {{ vrack_ip }}/32
+  register: boxd_node_nic
+  changed_when: false
+  check_mode: false
+  when: boxd_node_interface is not defined
+
+- name: Use that NIC
+  set_fact:
+    boxd_node_interface: "{{ boxd_node_nic.stdout.split()[1] }}"
+  when: boxd_node_interface is not defined and boxd_node_nic.stdout.split() | length > 1
+
+- name: Fail without a NIC holding the internal IP
+  fail:
+    msg: >-
+      no network device on {{ inventory_hostname }} holds its internal_ip
+      {{ vrack_ip }}; set interface under the cloud table in cluster.toml
+  when: boxd_node_interface is not defined
+
 - name: Fetch the assets bundle on the node
   include_tasks: fetch-assets.yml
   when: boxd_assets_url | default('') != ''

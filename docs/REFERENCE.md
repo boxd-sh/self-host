@@ -19,6 +19,12 @@ node). Roles can share a node.
 - **Machine types** have defaults per role. `machine_type` and `boot_disk_gb`
   are per-node overrides. Workers must set `data_disk_gb`, because VM disks
   live there.
+- **The network interface** boxd uses on the private network is, on each
+  node, the device that holds its `internal_ip`, read from the host at every
+  apply: instance types name it differently (AWS: `ens5`, `enp39s0` on m8i;
+  GCP: `ens4`, `ens3` with gVNIC). `interface` under `[aws]` or `[gcp]` sets
+  one name for every node instead; on bare metal it is required. A rendered
+  config (`render`) shows `@boxd_node_interface@` where each node's name goes.
 - **Nameservers:** the examples have one (`dns:ns1`). For redundancy, give a
   second node `dns:ns2`; `apply` then prints glue records for both. Today the
   zone's own NS answer always lists `ns1` and `ns2`, even with one
@@ -77,6 +83,56 @@ sizes = [
   AWS.
 - Several sizes can share a vCPU count (1 · 4 and 1 · 32). A request that
   names only `--vcpu 1` gets the smallest memory for that count.
+
+### Network modes
+
+`[network] mode` picks how machines are networked:
+
+- **`bridge`** (the default): each worker has its own `/16` for its machines
+  (from `bridge_subnet_base`: `10.100.0.0/16`, `10.101.0.0/16`, …) on a
+  `boxd-br0` bridge, and a VXLAN mesh joins the workers and proxies. A machine
+  that moves to another worker gets a new address there.
+- **`routed`**: one pool for the whole cluster, no bridge and no VXLAN. The
+  boxd binaries route each machine's traffic over Geneve (UDP 6081) to
+  wherever it runs, so a machine keeps its address for life. This is what live
+  migration needs (`boxd-ctl vm migrate <vm> --to <worker> --live`), which
+  moves only machines on boxd's storage engine. The installer doesn't set up
+  the storage engine yet, so `validate` warns when routed mode is used
+  without it.
+
+```toml
+[network]
+vni_range_start = 100     # still required; unused in routed mode
+vni_range_end   = 10000
+mode = "routed"
+pool = "10.120.0.0/16"    # instead of bridge_subnet_base
+# guest_mtu = 0           # optional, see below
+```
+
+- **`pool`** is a `/16` inside `10.0.0.0/8`. It must not overlap the VPC or
+  `10.96.0.0/12` and `10.244.0.0/16` (Kubernetes ranges people run inside
+  their machines; a machine's netmask is the whole pool). Its `x.y.0.0/24`
+  holds the hosts, never machines: `x.y.0.1` is every worker's gateway, a
+  worker is `x.y.0.(10 + its node id)`, and proxies are `x.y.0.254`
+  downwards.
+- **`guest_mtu`** is the MTU a newly booted machine gets, `0` for its own
+  1500, or 1280 to 1500. Geneve adds 50 bytes. The default is `0` on AWS
+  and GCP: the VPCs the installer makes carry 9001 and 8896. On bare metal
+  it is boxd's default, 1450, which suits a private network of 1500. Raise
+  the network's MTU to at least 1550 and set `0` if you can. `guest_mtu` is
+  also taken in bridge mode.
+- **Switching** an existing cluster between modes is refused while it has
+  machines, in either direction. A machine's saved memory (snapshots,
+  hibernation, templates) keeps the gateway and address it booted with, and
+  the other mode doesn't route those. Remove the machines first. The switch
+  itself retires the bridge and the VXLAN tunnels on workers and proxies, and
+  each worker refuses to go on while a machine's tap is still on its bridge.
+
+Both modes run boxd's guest firewall on every worker (nftables, keyed on
+each machine's tap). Machines reach the gateway's services, each other, the
+proxies' device ingress and the internet. They can't reach the hosts'
+other ports, the VPC or other private ranges, or the cloud metadata service.
+`boxd-worker` won't start without the firewall's tables loaded.
 
 ### License key
 
@@ -964,7 +1020,11 @@ your cluster the equivalent is always `<zone>` — `myapp.boxd.sh` there is
 ### Adding capacity
 
 Add the node to `cluster.toml` and re-apply — terraform creates the instance,
-ansible converges it, and the control plane picks it up:
+ansible converges it, and `apply` runs `boxd-ctl sync-config` on the raft
+leader, which adds the new node to the running cluster (a running cluster
+never adds a learner from its config by itself; installer releases before
+this one left a new worker logging "still not registered: not the leader",
+and `sudo boxd-ctl sync-config` on the leader joins it by hand):
 
 ```toml
 [[nodes]]
@@ -1068,6 +1128,18 @@ with a `.prev` sibling and full bucket versioning behind it. On bare metal
 it's the file `metal-state/<cluster>/installer-state.enc` next to
 `cluster.toml`, with only the `.prev` copy behind it: back it up. Don't run two
 applies concurrently — the last state push wins.
+
+**The egress CA.** Every worker signs the HTTPS its machines send through
+boxd's egress proxy with one CA, which each machine installs in its trust
+store when it boots. The state keeps the cluster's pair (`keys/egress-ca.pem`,
+`keys/egress-ca.key`), made at the first apply, and every `worker.toml` (mode
+0600) carries it as `egress_ca_cert` / `egress_ca_key`. So a machine that moves
+to another worker (a live migration, a relocated wake, a restore) keeps
+trusting it. It is never replaced. A cluster applied before this release has
+none in its state, and each worker made its own: the next apply adopts the
+first worker's pair it finds under `/mnt/boxd-data/egress-ca/` and says so.
+Machines on the other workers get it at their next boot, restore or fork, and
+their HTTPS through the egress proxy fails until then.
 
 ### Tearing down
 

@@ -67,12 +67,14 @@
     boxd_binary: boxd-worker
     boxd_service: boxd-worker
     boxd_role_name: worker
+    boxd_config_mode: "0600"
 
 - name: Install worker dependencies
   apt:
     name:
       - fakeroot
       - e2fsprogs
+      - nftables          # boxd-guest-fw, and the worker's own inet boxd_egress
     state: present
 
 - name: Enable IP forwarding
@@ -198,194 +200,13 @@
     label: "{{ item.path }}"
   tags: [swap]
 
-- name: Create boxd-br0 bridge
-  command: ip link add boxd-br0 type bridge
-  register: bridge_create
-  failed_when: bridge_create.rc != 0 and 'File exists' not in bridge_create.stderr
-  changed_when: bridge_create.rc == 0
+- name: Bridge networking (boxd-br0, the VXLAN mesh)
+  import_tasks: bridge-network.yml
+  when: boxd_network_mode | default('bridge') != 'routed'
 
-- name: Assign IP to boxd-br0
-  command: "ip addr add {{ bridge_gateway }}/16 dev boxd-br0"
-  register: bridge_ip
-  failed_when: bridge_ip.rc != 0 and 'File exists' not in bridge_ip.stderr and 'already assigned' not in bridge_ip.stderr
-  changed_when: bridge_ip.rc == 0
-
-- name: Bring up boxd-br0
-  command: ip link set boxd-br0 up
-  changed_when: false
-
-- name: Remove stale MASQUERADE rules for prior bridge_subnets
-  shell: |
-    set -e
-    expected="{{ bridge_subnet }}"
-    iptables -t nat -S POSTROUTING | while IFS= read -r line; do
-      case "$line" in
-        *"-j MASQUERADE"*)
-          case "$line" in
-            *"! -o boxd-br0"*)
-              src=$(printf '%s\n' "$line" | sed -n 's/.*-s \([0-9./]\+\).*/\1/p')
-              if [ -n "$src" ] && [ "$src" != "$expected" ]; then
-                del=$(printf '%s\n' "$line" | sed 's/^-A /-D /')
-                echo "removing stale: $del"
-                iptables -t nat $del
-              fi
-              ;;
-          esac
-          ;;
-      esac
-    done
-  register: stale_masq
-  changed_when: "'removing stale' in stale_masq.stdout"
-
-- name: NAT for VM outbound traffic
-  iptables:
-    table: nat
-    chain: POSTROUTING
-    source: "{{ bridge_subnet }}"
-    out_interface: "!boxd-br0"
-    jump: MASQUERADE
-    state: present
-
-- name: Block VM access to cloud metadata service
-  iptables:
-    chain: FORWARD
-    in_interface: boxd-br0
-    destination: 169.254.169.254
-    jump: DROP
-    state: present
-
-- name: Allow forwarding from bridge
-  iptables:
-    chain: FORWARD
-    in_interface: boxd-br0
-    jump: ACCEPT
-    state: present
-
-- name: Allow forwarding to bridge from vRack
-  iptables:
-    chain: FORWARD
-    in_interface: "{{ vrack_interface }}"
-    out_interface: boxd-br0
-    jump: ACCEPT
-    state: present
-
-- name: Allow forwarding to bridge (established)
-  iptables:
-    chain: FORWARD
-    out_interface: boxd-br0
-    ctstate: RELATED,ESTABLISHED
-    jump: ACCEPT
-    state: present
-
-- name: Block VM-to-VM traffic to exec server (port 9000)
-  iptables:
-    chain: FORWARD
-    in_interface: boxd-br0
-    out_interface: boxd-br0
-    protocol: tcp
-    destination_port: "9000"
-    jump: DROP
-    state: present
-
-- name: Find this worker's VXLAN config
-  set_fact:
-    my_worker: "{{ boxd_workers | selectattr('name', 'equalto', inventory_hostname) | first }}"
-
-- name: Create VXLAN interface for VM overlay
-  command: "ip link add vxlan{{ my_worker.vni }} type vxlan id {{ my_worker.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
-  register: vxlan_create
-  failed_when: vxlan_create.rc != 0 and 'File exists' not in vxlan_create.stderr
-  changed_when: vxlan_create.rc == 0
-
-- name: Add FDB entries for proxy nodes
-  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ hostvars[item].vrack_ip }}"
-  loop: "{{ groups['proxy'] }}"
-  changed_when: false
-  failed_when: false
-
-- name: Add FDB entries for peer workers (enables cross-worker ARP replies)
-  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ item.vrack_ip }} self permanent"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  changed_when: false
-  failed_when: false
-
-# `ip link set ... master` exits 0 for a device already on that bridge, so the
-# change is read off the device's current master instead.
-- name: Attach VXLAN to bridge
-  shell: |
-    set -e
-    if ! ip -o link show vxlan{{ my_worker.vni }} | grep -q ' master boxd-br0 '; then
-      ip link set vxlan{{ my_worker.vni }} master boxd-br0
-      echo CHANGED
-    fi
-  register: vxlan_bridge
-  changed_when: "'CHANGED' in vxlan_bridge.stdout"
-
-- name: Bring up VXLAN interface
-  command: "ip link set vxlan{{ my_worker.vni }} up"
-  changed_when: false
-
-- name: Create VXLAN tunnels to peer workers
-  command: "ip link add vxlan{{ item.vni }} type vxlan id {{ item.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  register: peer_vxlan
-  failed_when: peer_vxlan.rc != 0 and 'File exists' not in peer_vxlan.stderr
-  changed_when: peer_vxlan.rc == 0
-
-- name: Add FDB entries for peer workers
-  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ item.vni }} dst {{ item.vrack_ip }} self permanent"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  changed_when: false
-  failed_when: false
-
-- name: Compute this worker's peer IP suffix (250 - index)
-  set_fact:
-    my_worker_peer_suffix: "{{ 250 - (boxd_workers | map(attribute='name') | list).index(inventory_hostname) }}"
-
-- name: Add IP to peer VXLAN interfaces (needed for ARP, unique per worker)
-  command: "ip addr replace {{ item.bridge_subnet | regex_replace('0\\.0/16$', '0.' ~ my_worker_peer_suffix ~ '/16') }} dev vxlan{{ item.vni }}"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  changed_when: false
-  failed_when: false
-
-- name: Bring up peer VXLAN interfaces
-  command: "ip link set vxlan{{ item.vni }} up"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  changed_when: false
-
-- name: Add routes to peer worker bridge subnets
-  command: "ip route replace {{ item.bridge_subnet }} dev vxlan{{ item.vni }}"
-  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
-  changed_when: false
-  failed_when: false
-
-- name: Install VXLAN startup script
-  template:
-    src: boxd-vxlan.sh.j2
-    dest: /usr/local/bin/boxd-vxlan.sh
-    mode: "0755"
-
-- name: Install VXLAN systemd service
-  copy:
-    content: |
-      [Unit]
-      Description=boxd VXLAN overlay
-      After=network-online.target
-      Wants=network-online.target
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/bin/boxd-vxlan.sh
-      RemainAfterExit=yes
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/boxd-vxlan.service
-    mode: "0644"
-
-- name: Enable VXLAN service
-  systemd:
-    name: boxd-vxlan
-    enabled: true
-    daemon_reload: true
+- name: Routed networking (geneve0, boxd0, the eBPF datapath; no bridge)
+  import_tasks: routed-network.yml
+  when: boxd_network_mode | default('bridge') == 'routed'
 
 - name: Install per-VM DNS egress rate-limit script (anti-flood)
   template:
@@ -418,11 +239,112 @@
     state: started
     daemon_reload: true
 
-- name: Persist bridge config via netplan
-  template:
-    src: 60-boxd-bridge.yaml.j2
-    dest: /etc/netplan/60-boxd-bridge.yaml
-    mode: "0600"
+# Guest firewall: an nftables ruleset keyed
+# on the guest's tap, so guests reach the gateway's services (DNS, metadata,
+# the VM proxy, egress), other guests, the proxies' device ingress and the
+# internet, and nothing else of the infrastructure: not the worker's gRPC,
+# not the control network, not the VPC, not the cloud metadata service. See
+# files/boxd-guest-fw.sh (vendored from boxd) for the rules.
+#
+# The inputs are topology, so a converge is what changes them (adding a worker
+# or a proxy converges every worker anyway). Bridge mode: this worker's /16
+# and gateway, the other workers' /16s, and each proxy's on-link address on
+# this /16, 10.N.0.(254 - its index), as roles/boxd-proxy assigns it. Routed
+# mode: --routed, the pool and its gateway, and the proxies' host addresses in
+# the pool (the same .254-downwards rule, render.py). Single-cluster topology
+# only: no legacy gateways, no mixed bridge/routed workers.
+- name: Compute guest firewall arguments
+  set_fact:
+    boxd_guest_fw_args: >-
+      {% if boxd_network_mode | default('bridge') == 'routed' %}
+      --routed
+      {% endif %}
+      --subnet {{ bridge_subnet }} --gateway {{ bridge_gateway }}
+      {% if boxd_network_mode | default('bridge') != 'routed' %}
+      {% for peer in boxd_workers | rejectattr('name', 'equalto', inventory_hostname) %}
+      --peer-subnet {{ peer.bridge_subnet }}
+      {% endfor %}
+      {% endif %}
+      {% for proxy in groups['proxy'] %}
+      --proxy {{ bridge_subnet | regex_replace('0\.0/16$', '0.' ~ (254 - groups['proxy'].index(proxy))) }}
+      {% endfor %}
+
+- name: Install guest firewall script
+  copy:
+    src: boxd-guest-fw.sh  # vendored in this role's files/
+    dest: /usr/local/bin/boxd-guest-fw
+    mode: "0755"
+  notify: reapply guest firewall
+
+- name: Install guest firewall systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd guest firewall (nftables, per tap)
+      After=network-online.target boxd-vxlan.service
+      Wants=network-online.target
+      Before=boxd-worker.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      # No ExecStop: stopping must not unfilter guests. Remove by hand with
+      # `boxd-guest-fw --remove`.
+      ExecStart=/usr/local/bin/boxd-guest-fw {{ boxd_guest_fw_args | regex_replace('\s+', ' ') | trim }}
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-guest-fw.service
+    mode: "0644"
+  notify: reapply guest firewall
+
+- name: Enable + start guest firewall service
+  systemd:
+    name: boxd-guest-fw
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# Fail closed: boxd-worker starts only when the firewall's tables are loaded,
+# so a firewall that failed at boot leaves the worker (and every VM) down
+# rather than running guests unfiltered. An ExecStartPre check, not
+# Requires=: Requires= would restart the worker every time the firewall is
+# re-applied. Rolling back the firewall means removing this drop-in too.
+- name: Ensure boxd-worker drop-in directory exists
+  file:
+    path: /etc/systemd/system/boxd-worker.service.d
+    state: directory
+    mode: "0755"
+
+- name: Make boxd-worker require the guest firewall
+  copy:
+    content: |
+      [Unit]
+      Wants=boxd-guest-fw.service
+      After=boxd-guest-fw.service
+      [Service]
+      ExecStartPre=/usr/local/bin/boxd-guest-fw --verify{{ ' --routed' if boxd_network_mode | default('bridge') == 'routed' else '' }}
+    dest: /etc/systemd/system/boxd-worker.service.d/guest-fw.conf
+    mode: "0644"
+  notify: reload systemd
+
+# Bridge mode: guest -> 10.0.0.0/8 keeps its real source.
+# Masquerading it made a guest on another worker arrive as that worker's
+# 10.x.0.25x address, which the receiving tap's eBPF filter trusts as
+# infrastructure, and hid which guest sent it. Infrastructure destinations in
+# 10/8 are dropped by the firewall before NAT matters. Inserted at the top of
+# POSTROUTING, ahead of the MASQUERADE, and only after the firewall runs:
+# without it the exemption would send guest traffic into 10/8 unmasqueraded.
+# Routed mode's MASQUERADE already leaves 10/8 out (routed-network.yml).
+- name: Keep guest source addresses for internal destinations
+  iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ bridge_subnet }}"
+    destination: 10.0.0.0/8
+    jump: RETURN
+    action: insert
+    rule_num: "1"
+    state: present
+  when: boxd_network_mode | default('bridge') != 'routed'
 
 - name: Persist iptables rules
   apt:
