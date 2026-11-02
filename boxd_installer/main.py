@@ -41,7 +41,8 @@ def cmd_validate(args) -> int:
             "project or account can collide; rename them before the first apply.")
     # A [license].key_file that is missing or not a key stops here. No
     # terraform state here: workers without machine_type count as new ones.
-    warnings = license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
+    warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
+                + config.network_warnings(cfg))
     for warning in warnings:
         log(f"warning: {warning}")
     print("cluster.toml OK")
@@ -107,6 +108,8 @@ def _apply(cfg, args) -> int:
     if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
                                       if cfg.table(t)}):
         log(f"warning: {inert}")
+    for warning in config.network_warnings(cfg):
+        log(f"warning: {warning}")
     composio.sync_auth_configs(cfg, state, assets_root)
     ensure_egress_ca(cfg, state)
     alloc = state.allocate(cfg)
@@ -114,6 +117,7 @@ def _apply(cfg, args) -> int:
     _write_out(r.render_all(), args.out_dir)
 
     ansible.preflight(cfg)
+    check_network_mode(cfg, state)
     if not clouds.provisions(cfg):
         for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
             log(f"warning: {warning}")
@@ -160,6 +164,7 @@ def _apply(cfg, args) -> int:
     # The exact bundle this cluster now runs — with a channel, the only
     # record of what to pin to come back here (docs/REFERENCE.md "Upgrades and rollback").
     state.data["applied_assets"] = {"sha": cfg.assets_version, "channel": cfg.assets_channel}
+    state.data["network_mode"] = cfg.network_mode
     state.save()
 
     print()
@@ -174,6 +179,31 @@ def _apply(cfg, args) -> int:
             "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
             "  ./boxd-install state reset-eab\n  ./boxd-install apply")
     return 0
+
+def check_network_mode(cfg, state) -> None:
+    """Refuse to switch an existing cluster's [network] mode (bridge <->
+    routed) while it has machines: each one's captured RAM (snapshots,
+    hibernation, templates' copies) holds its old gateway and address, which
+    the other mode doesn't route. The deployed workers' configs say what the
+    cluster runs (a cluster switched by hand counts as switched); the state's
+    record covers a cluster whose workers were all replaced."""
+    if not state.data.get("applied_assets"):
+        return
+    want = cfg.network_mode
+    deployed = ansible.deployed_network_modes(cfg)
+    differ = sorted(n for n, mode in deployed.items() if mode != want)
+    recorded = state.data.get("network_mode")
+    if not differ and (deployed or recorded in (None, want)):
+        return
+    count = ansible.machine_count(cfg)
+    where = ", ".join(differ) if differ else "the cluster (installer state)"
+    if count:
+        raise InstallError(
+            f'[network] mode = "{want}", but {where} runs the other mode, and the cluster has '
+            f"{count} machine(s). Machines keep their old network in their saved memory, so the "
+            "mode only changes on a cluster without machines: remove them (`boxd-ctl vm list`), "
+            "or put mode back")
+    log(f'network: switching {where} to mode = "{want}" (no machines on the cluster)')
 
 def ensure_egress_ca(cfg, state) -> None:
     """One egress CA for the cluster, in state, before the render ships it to

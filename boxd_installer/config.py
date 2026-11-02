@@ -36,6 +36,36 @@ TEMPLATE_KEYS = {"sizes", "image", "tag"}
 # LLVM-compiled per-VM TC filters; "anti-spoof" attaches hand-assembled ones
 # (MAC/IP anti-spoof + infra-only :57073) and drops the tenant allow-list.
 TC_FILTERS = ("full", "anti-spoof")
+# [network] (boxd `NetworkConfig`). mode "routed": no bridge and no VXLAN, one
+# pool for every worker and proxy, machines that keep their address when they
+# move (live migration); boxd's plans/2026-10-27-routed-network.md.
+NETWORK_MODES = ("bridge", "routed")
+NETWORK_KEYS = {"vni_range_start", "vni_range_end", "bridge_subnet_base",
+                "mode", "pool", "guest_mtu"}
+# Ranges customers run inside their machines (the guest's mask is the whole
+# pool, so the pool must not hide them): Kubernetes services and flannel. The
+# other ones boxd's rollout runbook lists (172.16/12, 100.64/10, 192.168/16)
+# are outside 10/8, where the pool must be anyway.
+POOL_AVOID = (ipaddress.ip_network("10.96.0.0/12"), ipaddress.ip_network("10.244.0.0/16"))
+
+def pool_errors(pool, vpc) -> list[str]:
+    """What is wrong with a routed pool: an a.b.0.0/16 in 10/8 that overlaps
+    neither the VPC nor the ranges in POOL_AVOID."""
+    try:
+        net = ipaddress.ip_network(pool)
+    except (ValueError, TypeError) as e:
+        return [f"[network].pool: {e}"]
+    errs = []
+    if net.version != 4 or net.prefixlen != 16 or not net.subnet_of(PRIVATE_NET):
+        errs.append(f'[network].pool must be a /16 inside 10.0.0.0/8, like "10.120.0.0/16", '
+                    f"got {pool!r}")
+    if vpc and net.overlaps(vpc):
+        errs.append(f"[network].pool {pool} overlaps vpc_cidr {vpc}")
+    for avoid in POOL_AVOID:
+        if net.version == 4 and net.overlaps(avoid):
+            errs.append(f"[network].pool {pool} overlaps {avoid}, which machines' own "
+                        "software uses (Kubernetes)")
+    return errs
 
 class Node:
     def __init__(self, raw: dict):
@@ -74,6 +104,16 @@ OIDC_KEYS = set(OIDC_REQUIRED) | {"ca_cert", "bootstrap_admin", "link_email_doma
 # the providers config; cluster.toml only names the folder.
 ARCHIVE_STORE_KEYS = ("endpoint", "bucket", "region", "access_key", "secret_key")
 
+def network_warnings(cfg) -> list[str]:
+    """Routed mode is what live migration needs, and live migration moves
+    only machines on boxd's storage engine (`bucket`), which the installer
+    does not configure yet ([storage_engine])."""
+    if cfg.network_mode == "routed" and "storage_engine" not in cfg.doc:
+        return ['[network] mode = "routed" without the storage engine: machines keep their '
+                "address when they move, but a live migration (`boxd-ctl vm migrate --live`) "
+                "takes only machines on the storage engine, which this cluster does not run"]
+    return []
+
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for k, v in over.items():
@@ -98,6 +138,9 @@ class Config:
         self.cloud: dict = doc[self.cloud_name]
         self.vpc_cidr: str = self.cloud["vpc_cidr"]
         self.network: dict = doc["network"]
+        self.network_mode: str = self.network.get("mode", "bridge")
+        # routed: the cluster's /16 every worker and proxy share.
+        self.pool: str | None = self.network.get("pool")
         self.nodes: list[Node] = [Node(n) for n in doc["nodes"]]
         mod = clouds.CLOUDS[self.cloud_name]
         # None: each host's own NIC, found by ansible (render.IFACE_PLACEHOLDER).
@@ -213,9 +256,11 @@ def _validate(doc: dict) -> None:
     cloud = present[0]
     mod = clouds.CLOUDS[cloud]
 
+    routed = doc.get("network", {}).get("mode") == "routed"
     for tbl, keys in (("cluster", ("name", "zone", "assets_version")),
                       (cloud, mod.REQUIRED),
-                      ("network", ("vni_range_start", "vni_range_end", "bridge_subnet_base"))):
+                      ("network", ("vni_range_start", "vni_range_end")
+                       + (("pool",) if routed else ("bridge_subnet_base",)))):
         missing = [k for k in keys if k not in doc.get(tbl, {})]
         if missing:
             errs.append(f"[{tbl}] missing: {', '.join(missing)}")
@@ -316,15 +361,32 @@ def _validate(doc: dict) -> None:
             errs.append(f"nameserver slots must be contiguous from ns1, got {sorted(ns_slots)}")
 
     net = doc["network"]
-    if vpc:
-        try:
-            base = ipaddress.ip_network(net["bridge_subnet_base"] + "/16", strict=False)
-            if base.overlaps(vpc):
-                errs.append("[network].bridge_subnet_base overlaps vpc_cidr")
-            if not base.subnet_of(PRIVATE_NET):
-                errs.append("[network].bridge_subnet_base must be inside 10.0.0.0/8")
-        except ValueError as e:
-            errs.append(f"[network].bridge_subnet_base: {e}")
+    for k in net:
+        if k not in NETWORK_KEYS:
+            errs.append(f"[network].{k} is not a key the installer knows "
+                        f"({', '.join(sorted(NETWORK_KEYS))})")
+    mode = net.get("mode", "bridge")
+    if mode not in NETWORK_MODES:
+        errs.append(f"[network].mode must be one of {', '.join(NETWORK_MODES)}, got {mode!r}")
+    if mode == "routed":
+        errs.extend(pool_errors(net["pool"], vpc))
+    else:
+        if "pool" in net:
+            errs.append('[network].pool is only for mode = "routed"')
+        if vpc:
+            try:
+                base = ipaddress.ip_network(net["bridge_subnet_base"] + "/16", strict=False)
+                if base.overlaps(vpc):
+                    errs.append("[network].bridge_subnet_base overlaps vpc_cidr")
+                if not base.subnet_of(PRIVATE_NET):
+                    errs.append("[network].bridge_subnet_base must be inside 10.0.0.0/8")
+            except ValueError as e:
+                errs.append(f"[network].bridge_subnet_base: {e}")
+    if "guest_mtu" in net:
+        m = net["guest_mtu"]
+        if isinstance(m, bool) or not isinstance(m, int) or not (m == 0 or 1280 <= m <= 1500):
+            errs.append(f"[network].guest_mtu must be 0 (the guest's own 1500) or 1280 to 1500, "
+                        f"got {m!r}")
     if not net.get("vni_range_start", 0) < net.get("vni_range_end", 0):
         errs.append("[network] vni_range_start must be < vni_range_end")
 

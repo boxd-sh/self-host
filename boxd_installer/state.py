@@ -76,7 +76,9 @@ class State:
         bridges: dict = self.data.setdefault("bridge_indexes", {})
         next_vni = max([cfg.network["vni_range_start"] - 1] + list(vnis.values())) + 1
         next_bridge = max([-1] + list(bridges.values())) + 1
-        for node in cfg.nodes_with("worker"):
+        # Routed: one pool, no per-worker VNI or /16 (those of a cluster that
+        # was bridge stay, unused, so going back keeps the old addresses).
+        for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
             if node.name not in vnis:
                 vnis[node.name] = next_vni
                 next_vni += 1

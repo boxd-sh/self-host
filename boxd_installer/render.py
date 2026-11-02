@@ -67,6 +67,52 @@ class Renderer:
             return node.internal_ip
         raise InstallError(f"{node.name}: no external IP in terraform outputs (role needs one)")
 
+    def _routed(self) -> bool:
+        return self.cfg.network_mode == "routed"
+
+    def _pool_ip(self, last: int) -> str:
+        a, b = self.cfg.pool.split(".")[:2]
+        return f"{a}.{b}.0.{last}"
+
+    def routed_host_ip(self, node, role: str) -> str:
+        """A routed host's address in the pool's x.y.0.0/24 (boxd's
+        convention): a worker .(10 + its node id), proxies .254 downwards in
+        proxy order (the in-VM SDK dials x.y.0.254:9460, so the first proxy
+        holds .254). x.y.0.1 is every worker's gateway."""
+        proxies = self.cfg.nodes_with("proxy")
+        lowest_proxy = 254 - len(proxies) + 1
+        if role == "proxy":
+            return self._pool_ip(254 - [p.name for p in proxies].index(node.name))
+        last = 10 + self.alloc.node_id(node.name, "worker")
+        if last >= lowest_proxy:
+            raise InstallError(
+                f"{node.name}: its routed address would be {self._pool_ip(last)} (10 + node id "
+                f"{last - 10}), which the proxies' .254 downwards reach: too many nodes for one "
+                "pool's x.y.0.0/24")
+        return self._pool_ip(last)
+
+    def _routed_network(self, node, role: str) -> dict:
+        """[network] additions of a routed worker or proxy (boxd
+        `NetworkConfig`): the pool as bridge_subnet, the mode, and
+        [network.routed] with this host's pool and underlay addresses."""
+        net = {"bridge_subnet": self.cfg.pool, "mode": "routed"}
+        if role == "worker" and (mtu := self._guest_mtu()) is not None:
+            net["guest_mtu"] = mtu
+        net["routed"] = {"host_ip": self.routed_host_ip(node, role),
+                         "underlay_ip": node.internal_ip}
+        return net
+
+    def _guest_mtu(self) -> int | None:
+        """[network] guest_mtu when set; in routed mode else the cloud's
+        (ROUTED_GUEST_MTU: 0 on AWS and GCP, whose VPCs carry 9001 and 8896, so
+        the guest keeps 1500); None (metal) leaves boxd's default, 1450 in
+        routed mode, for a private network of 1500."""
+        if "guest_mtu" in self.cfg.network:
+            return self.cfg.network["guest_mtu"]
+        if self._routed():
+            return getattr(clouds.get(self.cfg), "ROUTED_GUEST_MTU", None)
+        return None
+
     def _iface(self) -> str:
         """The NIC name for a TOML: cluster.toml's, else the placeholder the
         node's own name replaces at the converge."""
@@ -266,6 +312,8 @@ class Renderer:
 
     def proxy_doc(self, node) -> dict:
         doc = self._base(node, "proxy")
+        if self._routed():
+            doc["network"].update(self._routed_network(node, "proxy"))
         p = dict(self.cfg.table("proxy"))
         p.pop("internal_services", None)
         tailscale = p.pop("tailscale", None)
@@ -328,7 +376,12 @@ class Renderer:
         # the worker makes its own, as before.
         if pair := self.state.egress_ca():
             doc["egress_ca_cert"], doc["egress_ca_key"] = pair
-        doc["network"]["bridge_subnet"] = self.alloc.bridge_subnet(node.name)
+        if self._routed():
+            doc["network"].update(self._routed_network(node, "worker"))
+        else:
+            doc["network"]["bridge_subnet"] = self.alloc.bridge_subnet(node.name)
+            if (mtu := self._guest_mtu()) is not None:
+                doc["network"]["guest_mtu"] = mtu
         doc["paths"] = {"run_dir": "/run/boxd", "data_dir": "/mnt/boxd-data", "log_dir": "/var/log/boxd"}
         worker = dict(self.cfg.table("worker"))
         for k in ("warm_slots", "nested_virt", "tc_filters"):
@@ -411,7 +464,10 @@ class Renderer:
             for n in nodes:
                 hv = {**clouds.get(cfg).host_vars(n, self.tf),
                       "vrack_ip": n.internal_ip, "node_id": alloc.node_id(n.name, n.primary_role)}
-                if group == "worker":
+                if group == "worker" and self._routed():
+                    hv["bridge_subnet"] = cfg.pool
+                    hv["bridge_gateway"] = self._pool_ip(1)
+                elif group == "worker":
                     hv["bridge_subnet"] = alloc.bridge_subnet(n.name)
                     hv["bridge_gateway"] = alloc.bridge_gateway(n.name)
                 pairs = ", ".join(f"{k}: {v}" for k, v in hv.items())
@@ -442,11 +498,13 @@ class Renderer:
                 f"clickhouse_password: {self.state.clickhouse_password()}",
                 f"clickhouse_allowed_network: {cfg.vpc_cidr}",
             ]
-        lines += [
-            "",
-            "boxd_workers:",
-        ]
-        for n in cfg.nodes_with("worker"):
+        if self._routed():
+            # No VXLAN mesh: boxd_workers (the bridge workers) is empty.
+            lines += ["", "boxd_network_mode: routed", f"boxd_routed_pool: {cfg.pool}",
+                      "boxd_workers: []"]
+        else:
+            lines += ["", "boxd_workers:"]
+        for n in cfg.nodes_with("worker") if not self._routed() else []:
             lines.append(
                 f"  - {{ name: {n.name}, vrack_ip: {n.internal_ip}, "
                 f"bridge_subnet: {self.alloc.bridge_subnet(n.name)}, vni: {self.alloc.vnis[n.name]} }}")

@@ -605,10 +605,12 @@ on 40000–60000.
 
 **Use dedicated hosts.** Besides the kernel and the disk, `apply` installs
 Docker on workers, sets sysctls and transparent hugepages, adds iptables
-NAT and forwarding rules, a `boxd-br0` bridge and VXLAN interfaces, and runs
-ClickHouse on the metrics node. VMs get addresses from `bridge_subnet_base`
-(default `10.100.0.0/16`), which must not overlap a network your hosts
-route to.
+NAT and forwarding rules, a `boxd-br0` bridge and VXLAN interfaces (or, in
+routed mode, the rules for boxd's own Geneve devices: see
+[REFERENCE.md "Network modes"](REFERENCE.md#network-modes)), an nftables
+guest firewall, and runs ClickHouse on the metrics node. VMs get addresses
+from `bridge_subnet_base` (default `10.100.0.0/16`), or from `pool` in
+routed mode, which must not overlap a network your hosts route to.
 
 ### 2. Secrets
 

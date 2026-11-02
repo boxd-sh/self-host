@@ -147,6 +147,7 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 vni_range_start    = 100
 vni_range_end      = 10000
 bridge_subnet_base = "10.100.0.0"
+# Routed networking instead (live migration): docs/REFERENCE.md, "Network modes".
 
 [control]
 socket_path = "/run/boxd/control.sock"

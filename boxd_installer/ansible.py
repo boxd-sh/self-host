@@ -171,6 +171,33 @@ def _ssh_opts(cfg) -> list[str]:
                      "-o", "ConnectTimeout=30",
                      "-i", os.path.join(_keys_dir, "boxd-deploy")]
 
+def deployed_network_modes(cfg) -> dict[str, str]:
+    """Each worker's [network] mode as its /etc/boxd/worker.toml has it
+    ("bridge" when the file names none); workers without the file (new ones)
+    are left out. Read and parsed here, so nothing on the host needs to."""
+    import tomllib
+    out = {}
+    for node in cfg.nodes_with("worker"):
+        res = _ssh(cfg, node, "sudo cat /etc/boxd/worker.toml",
+                   capture=True, check=False, quiet=True)
+        if res.returncode != 0:
+            continue
+        try:
+            doc = tomllib.loads(res.stdout)
+        except tomllib.TOMLDecodeError:
+            continue
+        out[node.name] = doc.get("network", {}).get("mode", "bridge")
+    return out
+
+def machine_count(cfg) -> int:
+    """The machines `boxd-ctl vm list` shows: "no vms", or a header line and
+    one line each."""
+    out = ctl(cfg, "vm list", quiet=True).stdout or ""
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    if not lines or lines[0].strip() == "no vms":
+        return 0
+    return len(lines) - 1
+
 # Where a worker without a configured egress CA keeps the pair it made itself
 # (boxd-worker: <[paths] data_dir>/egress-ca; render.worker_doc's data_dir).
 WORKER_EGRESS_CA_DIR = "/mnt/boxd-data/egress-ca"

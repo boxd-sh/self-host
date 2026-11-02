@@ -84,6 +84,56 @@ sizes = [
 - Several sizes can share a vCPU count (1 · 4 and 1 · 32). A request that
   names only `--vcpu 1` gets the smallest memory for that count.
 
+### Network modes
+
+`[network] mode` picks how machines are networked:
+
+- **`bridge`** (the default): each worker has its own `/16` for its machines
+  (from `bridge_subnet_base`: `10.100.0.0/16`, `10.101.0.0/16`, …) on a
+  `boxd-br0` bridge, and a VXLAN mesh joins the workers and proxies. A machine
+  that moves to another worker gets a new address there.
+- **`routed`**: one pool for the whole cluster, no bridge and no VXLAN. The
+  boxd binaries route each machine's traffic over Geneve (UDP 6081) to
+  wherever it runs, so a machine keeps its address for life. This is what live
+  migration needs (`boxd-ctl vm migrate <vm> --to <worker> --live`), which
+  moves only machines on boxd's storage engine. The installer doesn't set up
+  the storage engine yet, so `validate` warns when routed mode is used
+  without it.
+
+```toml
+[network]
+vni_range_start = 100     # still required; unused in routed mode
+vni_range_end   = 10000
+mode = "routed"
+pool = "10.120.0.0/16"    # instead of bridge_subnet_base
+# guest_mtu = 0           # optional, see below
+```
+
+- **`pool`** is a `/16` inside `10.0.0.0/8`. It must not overlap the VPC or
+  `10.96.0.0/12` and `10.244.0.0/16` (Kubernetes ranges people run inside
+  their machines; a machine's netmask is the whole pool). Its `x.y.0.0/24`
+  holds the hosts, never machines: `x.y.0.1` is every worker's gateway, a
+  worker is `x.y.0.(10 + its node id)`, and proxies are `x.y.0.254`
+  downwards.
+- **`guest_mtu`** is the MTU a newly booted machine gets, `0` for its own
+  1500, or 1280 to 1500. Geneve adds 50 bytes. The default is `0` on AWS
+  and GCP: the VPCs the installer makes carry 9001 and 8896. On bare metal
+  it is boxd's default, 1450, which suits a private network of 1500. Raise
+  the network's MTU to at least 1550 and set `0` if you can. `guest_mtu` is
+  also taken in bridge mode.
+- **Switching** an existing cluster between modes is refused while it has
+  machines, in either direction. A machine's saved memory (snapshots,
+  hibernation, templates) keeps the gateway and address it booted with, and
+  the other mode doesn't route those. Remove the machines first. The switch
+  itself retires the bridge and the VXLAN tunnels on workers and proxies, and
+  each worker refuses to go on while a machine's tap is still on its bridge.
+
+Both modes run boxd's guest firewall on every worker (nftables, keyed on
+each machine's tap). Machines reach the gateway's services, each other, the
+proxies' device ingress and the internet. They can't reach the hosts'
+other ports, the VPC or other private ranges, or the cloud metadata service.
+`boxd-worker` won't start without the firewall's tables loaded.
+
 ### License key
 
 Without a license key, a boxd cluster has the **free tier**: its workers may

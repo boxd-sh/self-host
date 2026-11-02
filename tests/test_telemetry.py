@@ -186,7 +186,7 @@ class ApplyPassesTheSetting(Isolated):
                                  instance_types=mock.Mock(return_value={})), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=mock.DEFAULT, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT,
+                                 converge=mock.DEFAULT, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
@@ -219,7 +219,7 @@ class ApplyPassesTheSetting(Isolated):
                                  instance_types=mock.Mock(return_value={})), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT,
+                                 converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
