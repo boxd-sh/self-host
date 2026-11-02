@@ -1,0 +1,200 @@
+---
+# Bridge networking ([network] mode = "bridge", the default): boxd-br0 with
+# this worker's own /16, and a VXLAN mesh to the proxies and the other
+# workers. Routed mode (routed-network.yml) has none of it.
+
+- name: Create boxd-br0 bridge
+  command: ip link add boxd-br0 type bridge
+  register: bridge_create
+  failed_when: bridge_create.rc != 0 and 'File exists' not in bridge_create.stderr
+  changed_when: bridge_create.rc == 0
+
+- name: Assign IP to boxd-br0
+  command: "ip addr add {{ bridge_gateway }}/16 dev boxd-br0"
+  register: bridge_ip
+  failed_when: bridge_ip.rc != 0 and 'File exists' not in bridge_ip.stderr and 'already assigned' not in bridge_ip.stderr
+  changed_when: bridge_ip.rc == 0
+
+- name: Bring up boxd-br0
+  command: ip link set boxd-br0 up
+  changed_when: false
+
+- name: Remove stale MASQUERADE rules for prior bridge_subnets
+  shell: |
+    set -e
+    expected="{{ bridge_subnet }}"
+    iptables -t nat -S POSTROUTING | while IFS= read -r line; do
+      case "$line" in
+        *"-j MASQUERADE"*)
+          case "$line" in
+            *"! -o boxd-br0"*)
+              src=$(printf '%s\n' "$line" | sed -n 's/.*-s \([0-9./]\+\).*/\1/p')
+              if [ -n "$src" ] && [ "$src" != "$expected" ]; then
+                del=$(printf '%s\n' "$line" | sed 's/^-A /-D /')
+                echo "removing stale: $del"
+                iptables -t nat $del
+              fi
+              ;;
+          esac
+          ;;
+      esac
+    done
+  register: stale_masq
+  changed_when: "'removing stale' in stale_masq.stdout"
+
+- name: NAT for VM outbound traffic
+  iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ bridge_subnet }}"
+    out_interface: "!boxd-br0"
+    jump: MASQUERADE
+    state: present
+
+- name: Block VM access to cloud metadata service
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    destination: 169.254.169.254
+    jump: DROP
+    state: present
+
+- name: Allow forwarding from bridge
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding to bridge from vRack
+  iptables:
+    chain: FORWARD
+    in_interface: "{{ vrack_interface }}"
+    out_interface: boxd-br0
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding to bridge (established)
+  iptables:
+    chain: FORWARD
+    out_interface: boxd-br0
+    ctstate: RELATED,ESTABLISHED
+    jump: ACCEPT
+    state: present
+
+- name: Block VM-to-VM traffic to exec server (port 9000)
+  iptables:
+    chain: FORWARD
+    in_interface: boxd-br0
+    out_interface: boxd-br0
+    protocol: tcp
+    destination_port: "9000"
+    jump: DROP
+    state: present
+
+- name: Find this worker's VXLAN config
+  set_fact:
+    my_worker: "{{ boxd_workers | selectattr('name', 'equalto', inventory_hostname) | first }}"
+
+- name: Create VXLAN interface for VM overlay
+  command: "ip link add vxlan{{ my_worker.vni }} type vxlan id {{ my_worker.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
+  register: vxlan_create
+  failed_when: vxlan_create.rc != 0 and 'File exists' not in vxlan_create.stderr
+  changed_when: vxlan_create.rc == 0
+
+- name: Add FDB entries for proxy nodes
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ hostvars[item].vrack_ip }}"
+  loop: "{{ groups['proxy'] }}"
+  changed_when: false
+  failed_when: false
+
+- name: Add FDB entries for peer workers (enables cross-worker ARP replies)
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ my_worker.vni }} dst {{ item.vrack_ip }} self permanent"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+# `ip link set ... master` exits 0 for a device already on that bridge, so the
+# change is read off the device's current master instead.
+- name: Attach VXLAN to bridge
+  shell: |
+    set -e
+    if ! ip -o link show vxlan{{ my_worker.vni }} | grep -q ' master boxd-br0 '; then
+      ip link set vxlan{{ my_worker.vni }} master boxd-br0
+      echo CHANGED
+    fi
+  register: vxlan_bridge
+  changed_when: "'CHANGED' in vxlan_bridge.stdout"
+
+- name: Bring up VXLAN interface
+  command: "ip link set vxlan{{ my_worker.vni }} up"
+  changed_when: false
+
+- name: Create VXLAN tunnels to peer workers
+  command: "ip link add vxlan{{ item.vni }} type vxlan id {{ item.vni }} local {{ vrack_ip }} dstport 4789 nolearning"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  register: peer_vxlan
+  failed_when: peer_vxlan.rc != 0 and 'File exists' not in peer_vxlan.stderr
+  changed_when: peer_vxlan.rc == 0
+
+- name: Add FDB entries for peer workers
+  command: "bridge fdb append 00:00:00:00:00:00 dev vxlan{{ item.vni }} dst {{ item.vrack_ip }} self permanent"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Compute this worker's peer IP suffix (250 - index)
+  set_fact:
+    my_worker_peer_suffix: "{{ 250 - (boxd_workers | map(attribute='name') | list).index(inventory_hostname) }}"
+
+- name: Add IP to peer VXLAN interfaces (needed for ARP, unique per worker)
+  command: "ip addr replace {{ item.bridge_subnet | regex_replace('0\\.0/16$', '0.' ~ my_worker_peer_suffix ~ '/16') }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Bring up peer VXLAN interfaces
+  command: "ip link set vxlan{{ item.vni }} up"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+
+- name: Add routes to peer worker bridge subnets
+  command: "ip route replace {{ item.bridge_subnet }} dev vxlan{{ item.vni }}"
+  loop: "{{ boxd_workers | rejectattr('name', 'equalto', inventory_hostname) | list }}"
+  changed_when: false
+  failed_when: false
+
+- name: Install VXLAN startup script
+  template:
+    src: boxd-vxlan.sh.j2
+    dest: /usr/local/bin/boxd-vxlan.sh
+    mode: "0755"
+
+- name: Install VXLAN systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd VXLAN overlay
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/boxd-vxlan.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-vxlan.service
+    mode: "0644"
+
+- name: Enable VXLAN service
+  systemd:
+    name: boxd-vxlan
+    enabled: true
+    daemon_reload: true
+
+- name: Persist bridge config via netplan
+  template:
+    src: 60-boxd-bridge.yaml.j2
+    dest: /etc/netplan/60-boxd-bridge.yaml
+    mode: "0600"
+

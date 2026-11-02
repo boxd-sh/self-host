@@ -1,0 +1,123 @@
+---
+# Routed networking ([network] mode = "routed"; boxd's
+# plans/2026-10-27-routed-network.md): no boxd-br0 and no VXLAN mesh. The
+# worker binary makes geneve0 (Geneve, UDP 6081, metadata mode), boxd0 (the
+# pool's gateway and this host's address) and the pool's route at its start,
+# and puts the routed datapath's eBPF programs on them and on every tap. What
+# is left here is what the host stack needs for the traffic that still
+# crosses it: forwarding, no reverse-path filtering on the taps and the tunnel,
+# the forward rules for taps, the tunnel and boxd0 (the FORWARD policy is DROP
+# once Docker is on the host), and the pool's NAT. The guest firewall runs
+# with --routed (main.yml).
+#
+# Ported from boxd's ansible/roles/boxd-worker/tasks/routed-network.yml at
+# ca7c8a5d, for a cluster whose workers are all routed: no legacy mesh, no
+# transit worker, no bridge workers beside them.
+#
+# A worker that was a bridge worker keeps nothing of it: its boxd-br0 and
+# VXLAN go here, once no machine's tap is left on the bridge.
+
+# The taps and geneve0 have no IPv4 address, and the kernel's loose check
+# drops every packet that enters such a device unless the route back to its
+# source uses it; the route back to any machine is boxd0. So the binary sets
+# rp_filter 0 on them, and `all` must be 0 too: the kernel takes the larger of
+# `all` and the device's value. New devices still start loose (`default`).
+- name: Reverse-path filtering per device (routed)
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: net.ipv4.conf.all.rp_filter, value: "0" }
+    - { name: net.ipv4.conf.default.rp_filter, value: "2" }
+
+- name: Block VM access to cloud metadata service (routed)
+  iptables:
+    chain: FORWARD
+    in_interface: tap+
+    destination: 169.254.169.254
+    jump: DROP
+    state: present
+
+- name: Allow forwarding from machines' taps
+  iptables:
+    chain: FORWARD
+    in_interface: tap+
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding from the Geneve tunnel
+  iptables:
+    chain: FORWARD
+    in_interface: geneve0
+    jump: ACCEPT
+    state: present
+
+- name: Allow forwarding to machines (boxd0)
+  iptables:
+    chain: FORWARD
+    out_interface: boxd0
+    jump: ACCEPT
+    state: present
+
+- name: Allow Geneve from the private network
+  iptables:
+    chain: INPUT
+    in_interface: "{{ vrack_interface }}"
+    protocol: udp
+    destination_port: "6081"
+    jump: ACCEPT
+    state: present
+
+# Machines' traffic to the internet leaves with this worker's address. Inside
+# 10/8 (other machines, the proxies' host addresses) it keeps its own: what
+# the guest firewall lets through there is meant to see the guest's address.
+- name: NAT for VM outbound traffic (routed)
+  iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ boxd_routed_pool }}"
+    destination: "!10.0.0.0/8"
+    jump: MASQUERADE
+    state: present
+
+- name: Check for a bridge left from bridge mode
+  stat:
+    path: /sys/class/net/boxd-br0
+  register: old_bridge
+
+- name: Retire the bridge (this worker was a bridge worker)
+  when: old_bridge.stat.exists
+  block:
+    - name: Refuse while machines are still on the bridge
+      shell: ls /sys/class/net/boxd-br0/brif 2>/dev/null | grep '^tap-' || true
+      register: old_bridge_taps
+      changed_when: false
+      failed_when: old_bridge_taps.stdout | length > 0
+
+    - name: Stop the bridge-mode unit
+      systemd:
+        name: boxd-vxlan
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Remove the bridge-mode unit, script and netplan
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/boxd-vxlan.service
+        - /usr/local/bin/boxd-vxlan.sh
+        - /etc/netplan/60-boxd-bridge.yaml
+
+    - name: Delete the bridge and the VXLAN devices
+      shell: |
+        for d in $(ls /sys/class/net | grep -E '^vxlan[0-9]+$') boxd-br0; do
+          ip link del "$d" && echo "deleted $d"
+        done
+        true
+      register: old_bridge_devices
+      changed_when: "'deleted' in old_bridge_devices.stdout"
