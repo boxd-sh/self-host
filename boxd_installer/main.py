@@ -121,6 +121,9 @@ def _apply(cfg, args) -> int:
                      control_carry.carry_dir(state))
 
     ansible.wait_for_leader(cfg)
+    # A node added to cluster.toml joins a running cluster only through the
+    # leader's sync-config (a no-op on a fresh cluster and on a re-apply).
+    ansible.sync_config(cfg)
     expected = len(cfg.nodes_with("worker"))
     gave_up = ansible.learners_gave_up(cfg)
     restarted = gave_up or (ansible._registered_nodes(cfg) or 0) < expected

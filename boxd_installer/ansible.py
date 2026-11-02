@@ -217,6 +217,45 @@ def wait_for_leader(cfg, timeout: int = 300) -> None:
         time.sleep(10)
     raise InstallError(f"no raft leader within {timeout}s — check boxd-control logs")
 
+def _is_leader(status_out: str) -> bool:
+    """`boxd-ctl status` run ON the leader says so on its first line:
+    `Leader: node 1 (10.70.1.10:7000) — this node`."""
+    import re
+    return re.search(r"^Leader:.*\bthis node\b", status_out, re.M) is not None
+
+def leader_node(cfg, timeout: int = 120):
+    """The control node that is the raft leader, or InstallError. Retried: a
+    restarted boxd-control may still be electing right after wait_for_leader
+    saw a leader through another node."""
+    deadline = time.time() + timeout
+    while True:
+        for node in cfg.nodes_with("control"):
+            res = _ssh(cfg, node, "sudo boxd-ctl status", capture=True, check=False, quiet=True)
+            if res.returncode == 0 and _is_leader(res.stdout):
+                return node
+        if time.time() >= deadline:
+            raise InstallError(f"no control node says it is the raft leader within {timeout}s "
+                               "— run `boxd-ctl status` on each control node")
+        time.sleep(10)
+
+def sync_config(cfg) -> list[str]:
+    """Add the learners new to the config (a worker, proxy or dns node added
+    to cluster.toml) to the running raft cluster. A running cluster never
+    reads them from the config by itself: the leader proposes them only on
+    `boxd-ctl sync-config`, and until then the new node logs "still not
+    registered: not the leader". On the leader only. Idempotent: with nothing
+    new it prints "No new learners to add" (members are re-proposed, a raft
+    no-op). Returns the "Added …" lines."""
+    leader = leader_node(cfg)
+    res = _ssh(cfg, leader, "sudo boxd-ctl sync-config", capture=True, check=False, quiet=True)
+    if res.returncode != 0:
+        raise InstallError(f"`boxd-ctl sync-config` on {leader.name} failed:\n"
+                           f"{((res.stderr or '') + (res.stdout or '')).strip()[-800:]}")
+    added = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.startswith("Added ")]
+    for line in added:
+        log(f"raft membership: {line}")
+    return added
+
 _LEARNER_UNITS = (("worker", "boxd-worker"), ("proxy", "boxd-proxy"), ("dns", "boxd-dns"))
 
 def learners_gave_up(cfg) -> list[str]:

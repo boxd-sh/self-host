@@ -964,7 +964,11 @@ your cluster the equivalent is always `<zone>` — `myapp.boxd.sh` there is
 ### Adding capacity
 
 Add the node to `cluster.toml` and re-apply — terraform creates the instance,
-ansible converges it, and the control plane picks it up:
+ansible converges it, and `apply` runs `boxd-ctl sync-config` on the raft
+leader, which adds the new node to the running cluster (a running cluster
+never adds a learner from its config by itself; installer releases before
+this one left a new worker logging "still not registered: not the leader",
+and `sudo boxd-ctl sync-config` on the leader joins it by hand):
 
 ```toml
 [[nodes]]
