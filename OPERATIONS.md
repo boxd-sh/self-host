@@ -24,6 +24,7 @@ organised by task and adds the context the help can't.
 - [Certificates from your own CA](#certificates-from-your-own-ca)
 - [Backups](#backups)
 - [Snapshot archive](#snapshot-archive)
+- [Bucket storage](#bucket-storage)
 - [Troubleshooting](#troubleshooting)
 - [Logs and support](#logs-and-support)
 - [Ask boxd first](#ask-boxd-first)
@@ -658,6 +659,41 @@ refused with a message saying so. Unarchive it first.
   everything that is `archived`: those bytes exist only in the bucket, and on
   AWS the next `apply` tries to delete it (it stops if the bucket isn't
   empty).
+
+## Bucket storage
+
+With `[storage_engine]` ([REFERENCE.md](docs/REFERENCE.md#bucket-storage-storage_engine)),
+machines' disks live in the cluster's bucket.
+
+**Check it.** On a worker, `journalctl -u boxd-worker | grep 'storage engine'`
+shows `the bucket is open` (or why not). On a control node:
+
+```sh
+sudo boxd-ctl cluster storage-catalog      # on, and every node capable
+sudo boxd-ctl cluster default-vm-storage   # new machines: bucket storage; the engine workers
+sudo boxd-ctl vm info <machine>            # storage: bucket, volume …
+```
+
+**Existing machines** stay on file storage. Move one onto the engine with
+`sudo boxd-ctl vm storage <machine> --to bucket` (it restarts once), and
+check with `vm storage status`. A snapshot taken on file storage makes file
+machines: convert it with `boxd-ctl snapshot convert`. A team's default
+snapshot counts as one too, so new machines from it stay on file until it is
+converted.
+
+**Before rolling a node back** to a bundle without the engine: there is no
+installer path for that. Turn the catalog off first
+(`boxd-ctl cluster set-storage-catalog off`); engine machines can't open their
+disks while it is off. The next `apply` refuses to run until it is on again.
+
+**The license.** Without `bucket-storage` (the key expired, or a key without
+it), new machines are born on file, and machines already in the bucket keep
+starting, waking and forking. Going from the paid bundle back to the free one
+is refused while the cluster runs the engine.
+
+**Destroy** keeps the bucket while it holds anything, and says so. A rebuilt
+cluster starts under a new prefix in it; the old prefix's objects stay until
+you delete them.
 
 ## Troubleshooting
 
