@@ -189,6 +189,39 @@ def deployed_network_modes(cfg) -> dict[str, str]:
         out[node.name] = doc.get("network", {}).get("mode", "bridge")
     return out
 
+def deployed_bucket_identities(cfg) -> dict[str, dict]:
+    """Which bucket and prefix each worker's deployed storage engine uses
+    (/etc/boxd/bucket.toml): kind, bucket, endpoint, prefix. Never the keys:
+    the file is parsed here and only those fields are kept. Workers without
+    the file are left out."""
+    import tomllib
+    out = {}
+    for node in cfg.nodes_with("worker"):
+        res = _ssh(cfg, node, "sudo cat /etc/boxd/bucket.toml",
+                   capture=True, check=False, quiet=True)
+        if res.returncode != 0:
+            continue
+        try:
+            doc = tomllib.loads(res.stdout)
+        except tomllib.TOMLDecodeError:
+            continue
+        out[node.name] = {"kind": doc.get("kind", "s3"), "bucket": doc.get("bucket", ""),
+                          "endpoint": doc.get("endpoint", ""), "prefix": doc.get("prefix", "")}
+    return out
+
+def worker_bucket_line(cfg, node) -> str:
+    """The last thing the worker's current process logged about its bucket:
+    opened, bucket mode off, or a build without the engine refusing its
+    config (""; nothing yet). Scoped to the systemd invocation, so an older
+    process's line never counts."""
+    res = _ssh(cfg, node,
+               "sudo journalctl -q --no-pager -o cat _SYSTEMD_INVOCATION_ID="
+               "$(systemctl show -p InvocationID --value boxd-worker) "
+               "| grep -E 'storage engine: (the bucket is open|bucket mode is off)"
+               "|built without the .bucket. feature' | tail -n 1",
+               check=False, capture=True, quiet=True)
+    return res.stdout or ""
+
 def machine_count(cfg) -> int:
     """The machines `boxd-ctl vm list` shows: "no vms", or a header line and
     one line each."""
@@ -348,11 +381,17 @@ def verify_registration(cfg, expected: int, timeout: int = 180) -> None:
                        f"(last saw: {seen}) — run `boxd-ctl status` on a "
                        "control node to inspect")
 
-def seed_templates(cfg, image: str, tag: str, assets_sha: str, timeout: int = 1200) -> None:
+def seed_templates(cfg, image: str, tag: str, assets_sha: str, timeout: int = 1200,
+                   storage: str = "file") -> None:
     """Mirror of scripts/deploy/templates.sh: create per-size templates, wait
     ready, set-default, THEN flip the default image (a not-ready default just
     routes creates down the ~12s cold-boot path). Names embed tag + assets
-    sha so a new assets zip re-seeds even on an unchanged image tag."""
+    sha so a new assets zip re-seeds even on an unchanged image tag.
+
+    `storage`: "bucket" once the storage engine is the default for new
+    machines, which match only bucket templates (built once, shared through
+    the bucket); "file" otherwise. Templates are matched by their whole name:
+    a substring match once took another template for one of these."""
     sizes = cfg.machine_sizes()
     image = cfg.table("templates").get("image", image)
     tag = cfg.table("templates").get("tag", tag)
@@ -367,13 +406,15 @@ def seed_templates(cfg, image: str, tag: str, assets_sha: str, timeout: int = 12
     created = []
     deadline = time.time() + timeout
     listing = ctl(cfg, "template list", check=False).stdout or ""
+    kind = "bucket-" if storage == "bucket" else ""
+    flag = " --storage bucket" if storage == "bucket" else ""
     for s in sizes:
-        name = f"computer-{s['vcpu']}x{s['memory_gb']}-{tag}-{stamp}"
-        if name in listing:
+        name = f"computer-{kind}{s['vcpu']}x{s['memory_gb']}-{tag}-{stamp}"
+        if name in _template_names(listing):
             log(f"template {name} already exists")
         else:
             ctl(cfg, f"template create --image '{ref}' --vcpu {s['vcpu']} "
-                     f"--memory {s['memory_gb']}G --name '{name}'")
+                     f"--memory {s['memory_gb']}G{flag} --name '{name}'")
         created.append(name)
         log(f"waiting for template {name} to become ready…")
         while time.time() < deadline:
@@ -396,9 +437,7 @@ def seed_templates(cfg, image: str, tag: str, assets_sha: str, timeout: int = 12
     listing = ctl(cfg, "template list", check=False).stdout or ""
     for line in listing.splitlines():
         cols = line.split()
-        if len(cols) < 2 or "computer-" not in line:
-            continue
-        if any(name in line for name in created):
+        if len(cols) < 2 or not cols[1].startswith("computer-") or cols[1] in created:
             continue
         tid = cols[0]
         log(f"deleting superseded template {tid} ({line.strip()[:80]})")
@@ -521,11 +560,18 @@ def _first_column(listing: str, skip: tuple[str, ...]) -> list[str]:
     return [line.split()[0] for line in (listing or "").splitlines()
             if line.split() and line.split()[0] not in skip]
 
+def _template_rows(listing: str) -> list[list[str]]:
+    """`template list` rows as columns: ID, NAME, then the rest."""
+    return [cols for cols in (line.split() for line in listing.splitlines()) if len(cols) >= 2]
+
+def _template_names(listing: str) -> set[str]:
+    return {cols[1] for cols in _template_rows(listing)}
+
 def _ready(listing: str, name: str) -> bool:
-    return any(name in line and "ready" in line for line in listing.splitlines())
+    return any(cols[1] == name and "ready" in cols[2:] for cols in _template_rows(listing))
 
 def _template_id(listing: str, name: str) -> str:
-    for line in listing.splitlines():
-        if name in line:
-            return line.split()[0]
+    for cols in _template_rows(listing):
+        if cols[1] == name:
+            return cols[0]
     raise InstallError(f"could not resolve template id for {name}")

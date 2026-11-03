@@ -86,6 +86,9 @@ class FakeState:
     def acme_eab(self, ca, project, email): return {"kid": "k", "hmac": "h"}
     def clickhouse_password(self): return "pw"
     def egress_ca(self): return None
+    def storage_guard(self): return None
+    def storage_prefix(self): return "engine/0000000000000000"
+    def clear_storage_engine(self): pass
 
 class RenderMachineSizes(unittest.TestCase):
     """Sizes are cluster state (`boxd-ctl machine-sizes set`, see

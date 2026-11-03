@@ -115,6 +115,12 @@ def destroy(cfg, tfvars_path: str) -> None:
     _tf(cfg, "destroy", "-input=false", "-auto-approve",
         f"-var-file={os.path.abspath(tfvars_path)}")
 
+def state_list(cfg) -> list[str]:
+    """The resource addresses in terraform state (after a failed destroy:
+    what is left)."""
+    res = _tf(cfg, "state", "list", capture=True, quiet=True)
+    return [line.strip() for line in (res.stdout or "").splitlines() if line.strip()]
+
 def read_outputs(cfg, state) -> dict:
     """terraform's outputs; on metal (no terraform) the adapter's, from
     cluster.toml. Cached either way, for `render`."""
