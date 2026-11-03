@@ -65,6 +65,13 @@ variable "enable_snapshot_archive" {
   default = false
 }
 
+# [storage_engine] declared in cluster.toml (and [aws] auto_storage_bucket
+# not false): storage_bucket.tf.
+variable "enable_storage_bucket" {
+  type    = bool
+  default = false
+}
+
 # "vpc": the installer-created buckets' data only through the VPC's S3
 # gateway endpoint (bucket_access.tf). "anywhere": IAM alone decides.
 variable "bucket_access" {

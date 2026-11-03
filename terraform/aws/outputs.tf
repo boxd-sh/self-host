@@ -20,6 +20,21 @@ output "snapshot_archive" {
   } : null
 }
 
+# The storage engine's store, for the workers' bucket.toml (render.py). No
+# endpoint: boxd's S3 client takes the region's own, as it did on the AWS
+# end-to-end cluster. No conditional_put: boxd's default (probe) makes the
+# bucket's open write, which is how apply tells a bad key.
+output "storage_bucket" {
+  sensitive = true
+  value = var.enable_storage_bucket ? {
+    kind       = "s3"
+    bucket     = aws_s3_bucket.storage[0].bucket
+    region     = var.region
+    access_key = aws_iam_access_key.storage[0].id
+    secret_key = aws_iam_access_key.storage[0].secret
+  } : null
+}
+
 output "nodes" {
   value = {
     for name, n in aws_instance.node : name => {

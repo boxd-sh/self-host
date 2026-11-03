@@ -9,6 +9,17 @@ output "backups" {
   } : null
 }
 
+# The storage engine's store, for the workers' bucket.toml (render.py). No
+# credentials: the workers reach the bucket as the service account attached
+# to them (storage_bucket.tf), through the metadata server.
+output "storage_bucket" {
+  sensitive = true
+  value = var.enable_storage_bucket ? {
+    kind   = "gcs"
+    bucket = google_storage_bucket.storage[0].name
+  } : null
+}
+
 output "nodes" {
   value = {
     for name, n in google_compute_instance.node : name => {

@@ -1,5 +1,5 @@
 # bucket_access = "vpc": the data in the buckets the installer creates
-# (backups, snapshot archive) is reachable only through this VPC's S3
+# (backups, snapshot archive, storage) is reachable only through this VPC's S3
 # gateway endpoint. Every reader and writer is a node in the VPC (boxd signs
 # its own requests; nothing hands out presigned URLs), so nothing else needs
 # it. Bucket configuration stays manageable from anywhere with IAM, which is
@@ -8,6 +8,7 @@ locals {
   vpc_only_buckets = var.bucket_access != "vpc" ? {} : merge(
     var.enable_backups ? { backups = aws_s3_bucket.backups[0] } : {},
     var.enable_snapshot_archive ? { snapshot_archive = aws_s3_bucket.snapshot_archive[0] } : {},
+    var.enable_storage_bucket ? { storage = aws_s3_bucket.storage[0] } : {},
   )
 }
 
@@ -45,5 +46,6 @@ resource "aws_s3_bucket_policy" "vpc_only" {
     }]
   })
   # S3 rejects a bucket policy while the public access block is being written.
-  depends_on = [aws_s3_bucket_public_access_block.backups, aws_s3_bucket_public_access_block.snapshot_archive]
+  depends_on = [aws_s3_bucket_public_access_block.backups, aws_s3_bucket_public_access_block.snapshot_archive,
+  aws_s3_bucket_public_access_block.storage]
 }
