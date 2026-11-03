@@ -194,8 +194,6 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
             "file-only one (its manifest lists no \"bucket\" feature). Set "
             '[cluster].assets_version = "storage/latest" (or a storage bundle\'s id), or remove '
             "[storage_engine]")
-    raise InstallError("[storage_engine]: this installer checks for a storage bundle but doesn't "
-                       "configure the storage engine yet; that needs a newer installer")
 
 def check_network_mode(cfg, state) -> None:
     """Refuse to switch an existing cluster's [network] mode (bridge <->
@@ -332,6 +330,20 @@ PROVIDERS_TEMPLATE = """\
 # region = ""
 # access_key = ""
 # secret_key = ""
+
+# The storage engine's bucket (machines' disks). Turned on by [storage_engine]
+# in cluster.toml; on AWS and GCP the installer creates the bucket. Set these
+# only for YOUR OWN S3-compatible bucket: on [metal], or with [aws]/[gcp]
+# auto_storage_bucket = false (refused while the installer makes the bucket).
+# The bucket needs a lifecycle rule that aborts incomplete multipart uploads.
+# conditional_put: leave it out (probe) so apply can test the bucket opens.
+# [storage_engine]
+# endpoint = "https://s3.<region>.amazonaws.com"
+# region = ""
+# bucket = ""
+# access_key = ""
+# secret_key = ""
+# virtual_hosted_style = false
 
 # Composio integrations. auth_configs/webhook_secret/connect_domain are
 # derived by the installer — only the keys below belong here.

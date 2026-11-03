@@ -24,8 +24,9 @@ SSH_PATH = "SSM"
 SSH_HINT = ("ssm:StartSession on the instances and that their SSM agent is "
             "online (`aws ssm describe-instance-information`)")
 AMI_PARAMETER = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
-# S3 bucket names max out at 63 chars; ours are <name>-backups-<account-id>-<region>
-# and <name>-archive-<account-id>-<region> (same length).
+# S3 bucket names max out at 63 chars; ours are <name>-backups-<account-id>-<region>,
+# <name>-archive-<account-id>-<region> and <name>-storage-<account-id>-<region>
+# (all the same length).
 BUCKET_NAME_MAX = 63
 ACCOUNT_ID_LEN = 12
 
@@ -76,22 +77,31 @@ def _auto_archive(doc: dict) -> bool:
     bucket, from `providers edit`)."""
     return "snapshot_archive" in doc and doc["aws"].get("auto_snapshot_archive", True) is not False
 
+def _auto_storage(doc: dict) -> bool:
+    """[storage_engine] declared in cluster.toml makes terraform create the
+    cluster's storage bucket and its key, unless [aws] auto_storage_bucket =
+    false (your own bucket, from `providers edit`)."""
+    return isinstance(doc.get("storage_engine"), dict) and \
+        doc["aws"].get("auto_storage_bucket", True) is not False
+
 def validate(doc: dict, errs: list[str]) -> None:
     aws = doc["aws"]
     ingress = _validate_ingress(doc, errs)
     access = aws.get("bucket_access", "anywhere")
     if access not in BUCKET_ACCESS:
         errs.append(f"[aws].bucket_access must be one of {', '.join(BUCKET_ACCESS)}, got {access!r}")
-    elif access == "vpc" and not (aws.get("auto_backups", True) or _auto_archive(doc)):
+    elif access == "vpc" and not (aws.get("auto_backups", True) or _auto_archive(doc)
+                                  or _auto_storage(doc)):
         errs.append('[aws].bucket_access = "vpc" restricts the buckets the installer '
                     "creates; with auto_backups = false and no auto-created snapshot "
-                    "archive there are none")
+                    "archive or storage bucket there are none")
     if "auto_snapshot_archive" in aws and not isinstance(aws["auto_snapshot_archive"], bool):
         errs.append("[aws].auto_snapshot_archive must be true or false")
     max_name = BUCKET_NAME_MAX - len(f"-backups-{'0' * ACCOUNT_ID_LEN}-{aws['region']}")
     if len(doc["cluster"]["name"]) > max_name:
         errs.append(f"[cluster].name must be <= {max_name} chars in {aws['region']} (the "
-                    "buckets are <name>-backups-/<name>-archive-<account-id>-<region>, max 63)")
+                    "buckets are <name>-backups-/-archive-/-storage-<account-id>-<region>, "
+                    "max 63)")
     try:
         vpc = ipaddress.ip_network(aws["vpc_cidr"])
         pub = ipaddress.ip_network(aws["public_subnet_cidr"])
@@ -135,6 +145,7 @@ def tfvars(cfg, state, nodes: list[dict]) -> dict:
         "ingress_cidrs": ingress_cidrs(cfg.cloud),
         "bucket_access": cfg.cloud.get("bucket_access", "anywhere"),
         "enable_snapshot_archive": _auto_archive(cfg.doc),
+        "enable_storage_bucket": _auto_storage(cfg.doc),
         "nodes": nodes,
     }
 
