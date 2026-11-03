@@ -69,6 +69,30 @@
     boxd_role_name: worker
     boxd_config_mode: "0600"
 
+# [storage_engine]: the engine's bucket file (render.storage_store), which
+# worker.toml's [storage_engine.bucket] config names. 0600 and owned by boxd:
+# boxd refuses a bucket file group or others can read (it holds the bucket's
+# key on AWS and metal). Here, before the worker's first start below and its
+# restart (handlers run last), so the worker never starts without it.
+- name: Copy the storage engine's bucket config
+  copy:
+    src: "{{ boxd_config_local_dir }}/{{ inventory_hostname }}/bucket.toml"
+    dest: "{{ boxd_config_dir }}/bucket.toml"
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0600"
+  when: boxd_storage_engine | default(false) | bool
+  notify: restart boxd service
+
+# Without [storage_engine] (apply allows that only before the storage catalog
+# was ever on): a bucket file left from before goes.
+- name: Remove the bucket config without the storage engine
+  file:
+    path: "{{ boxd_config_dir }}/bucket.toml"
+    state: absent
+  when: not (boxd_storage_engine | default(false) | bool)
+  notify: restart boxd service
+
 - name: Install worker dependencies
   apt:
     name:

@@ -4,13 +4,19 @@ worker. Terraform makes the bucket (AWS, GCP), the render gives workers
 behind a one-way guard. Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import os
+import shutil
+import tempfile
 import tomllib
 import unittest
 
-from boxd_installer import config, tf
+from boxd_installer import config, local_ca, render, tf
+from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
+from test_local_ca import Alloc, KeysState
 from test_machine_sizes import ROOT, FakeState, aws_doc, validate
+
+WORKER = "boxd-aws-demo-worker-0"
 
 LICENSED = {"key_file": "license.key"}
 
@@ -138,6 +144,125 @@ class Tfvars(unittest.TestCase):
         self.assertFalse(tfvars(engine_doc(auto_storage_bucket=False))["enable_storage_bucket"])
         self.assertFalse(tfvars(engine_doc(cloud="gcp", auto_storage_bucket=False))
                          ["enable_storage_bucket"])
+
+TF_S3 = {"kind": "s3", "bucket": "tf-storage", "region": "us-east-1",
+         "access_key": "AKIATF", "secret_key": "tf-secret"}
+TF_GCS = {"kind": "gcs", "bucket": "proj-demo-storage"}
+OWN = {"endpoint": "https://objects.example", "region": "lon2", "bucket": "own",
+       "access_key": "AKOWN", "secret_key": "own-secret"}
+PREFIX = "engine/0123456789abcdef"
+
+class EngineState(KeysState):
+    data: dict = {}
+    def storage_prefix(self): return PREFIX
+
+class Render(unittest.TestCase):
+    def setUp(self):
+        self.keys = tempfile.mkdtemp(prefix="storage-engine-")
+        for f in (local_ca.CERT_FILE, local_ca.KEY_FILE):
+            open(os.path.join(self.keys, f), "w").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.keys)
+
+    def renderer(self, doc, tf_store=None, overlay=None):
+        doc["acme"] = {"ca": "local"}
+        cfg = config.Config(doc)
+        cfg.apply_overlay(overlay or {})
+        tf_out = {"nodes": {n.name: {"external_ip": "203.0.113.7", "instance_id": "i-0"}
+                            for n in cfg.nodes}}
+        if tf_store:
+            tf_out["storage_bucket"] = tf_store
+        return render.Renderer(cfg, Alloc(), tf_out, EngineState(self.keys))
+
+    def files(self, doc, tf_store=None, overlay=None) -> dict:
+        r = self.renderer(doc, tf_store, overlay)
+        files = r.deploy_configs()
+        files["group_vars"] = r.group_vars()
+        return files
+
+    def toml(self, files, path) -> dict:
+        return tomllib.loads(files[path])
+
+    def test_only_workers_get_the_engine_and_the_bucket_file(self):
+        files = self.files(engine_doc({"cache_gib": 40, "ram_cache_gib": 8}), TF_S3)
+        worker = self.toml(files, f"deploy-config/{WORKER}/worker.toml")
+        self.assertEqual(worker["storage_engine"], {
+            "backends": ["bucket"], "ram_cache_gib": 8,
+            "bucket": {"config": "/etc/boxd/bucket.toml", "cache_gib": 40}})
+        self.assertEqual(worker["worker"]["templates"], "both")
+        self.assertEqual(self.toml(files, f"deploy-config/{WORKER}/bucket.toml"), {
+            "kind": "s3", "region": "us-east-1", "bucket": "tf-storage", "prefix": PREFIX,
+            "access_key_id": "AKIATF", "secret_access_key": "tf-secret"})
+        for path, body in files.items():
+            if path.endswith(".toml") and not path.startswith(f"deploy-config/{WORKER}/"):
+                self.assertNotIn("storage_engine", tomllib.loads(body), path)
+        self.assertEqual([p for p in files if p.endswith("bucket.toml")],
+                         [f"deploy-config/{WORKER}/bucket.toml"])
+        self.assertIn("boxd_storage_engine: true", files["group_vars"])
+
+    def test_gcs_has_no_key(self):
+        files = self.files(engine_doc(cloud="gcp"), TF_GCS)
+        worker = next(p for p in files if p.endswith("/bucket.toml"))
+        self.assertEqual(self.toml(files, worker), {"kind": "gcs", "bucket": "proj-demo-storage",
+                                                    "prefix": PREFIX})
+
+    def test_no_conditional_put_so_the_open_probes(self):
+        files = self.files(engine_doc(), TF_S3)
+        self.assertNotIn("conditional_put", self.toml(files, f"deploy-config/{WORKER}/bucket.toml"))
+
+    def test_without_the_table_nothing(self):
+        files = self.files(aws_doc(), TF_S3)
+        self.assertFalse([p for p in files if p.endswith("bucket.toml")])
+        self.assertNotIn("storage_engine", self.toml(files, f"deploy-config/{WORKER}/worker.toml"))
+        self.assertNotIn("templates", self.toml(files, f"deploy-config/{WORKER}/worker.toml")["worker"])
+        self.assertIn("boxd_storage_engine: false", files["group_vars"])
+
+    def test_an_operator_templates_setting_wins(self):
+        doc = engine_doc()
+        doc["worker"] = {"templates": "fetch"}
+        files = self.files(doc, TF_S3)
+        self.assertEqual(self.toml(files, f"deploy-config/{WORKER}/worker.toml")["worker"]["templates"],
+                         "fetch")
+
+    def test_own_bucket_replaces_terraforms(self):
+        doc = engine_doc(auto_storage_bucket=False)
+        files = self.files(doc, None, {"storage_engine": {**OWN, "virtual_hosted_style": True}})
+        self.assertEqual(self.toml(files, f"deploy-config/{WORKER}/bucket.toml"), {
+            "kind": "s3", "endpoint": "https://objects.example", "region": "lon2", "bucket": "own",
+            "prefix": PREFIX, "access_key_id": "AKOWN", "secret_access_key": "own-secret",
+            "virtual_hosted_style": True})
+
+    def test_own_bucket_refused_while_terraform_makes_one(self):
+        with self.assertRaisesRegex(InstallError, "auto_storage_bucket = false"):
+            self.files(engine_doc(), TF_S3, {"storage_engine": OWN})
+
+    def test_no_bucket_at_all(self):
+        with self.assertRaisesRegex(InstallError, "auto_storage_bucket = false. Set your bucket"):
+            self.files(engine_doc(auto_storage_bucket=False))
+        with self.assertRaisesRegex(InstallError, "has no secret_key"):
+            self.files(engine_doc(auto_storage_bucket=False), None,
+                       {"storage_engine": {k: v for k, v in OWN.items() if k != "secret_key"}})
+
+    def test_identity(self):
+        r = self.renderer(engine_doc(), TF_S3)
+        self.assertEqual(r.storage_identity(), {"kind": "s3", "bucket": "tf-storage", "endpoint": "",
+                                                "prefix": PREFIX, "auto": True})
+        self.assertEqual(self.renderer(aws_doc(), TF_S3).storage_identity(), {})
+
+class Prefix(unittest.TestCase):
+    def test_made_once_kept_and_cleared_by_destroy(self):
+        d = tempfile.mkdtemp(prefix="storage-prefix-")
+        self.addCleanup(shutil.rmtree, d)
+        st = State(d)
+        first = st.storage_prefix()
+        self.assertRegex(first, r"^engine/[0-9a-f]{16}$")
+        self.assertEqual(State(d).storage_prefix(), first)
+        st.set_storage_guard({"bucket": "b"})
+        st.clear_storage_engine()
+        again = State(d)
+        self.assertIsNone(again.storage_guard())
+        self.assertNotEqual(again.storage_prefix(), first)
 
 if __name__ == "__main__":
     unittest.main()
