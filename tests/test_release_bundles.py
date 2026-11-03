@@ -82,8 +82,11 @@ class Bucket:
 
     def bundle(self, sha: str = SHA, *, release_sha: str | None = None,
                size_delta: int = 0, manifest_sha256: str | None = None,
-               extra_entries: dict | None = None, sha_field: str | None = None) -> bytes:
-        """A two-file zip with its MANIFEST.json, release.json and signature."""
+               extra_entries: dict | None = None, sha_field: str | None = None,
+               manifest_extra: dict | None = None) -> bytes:
+        """A two-file zip with its MANIFEST.json, release.json and signature.
+        manifest_extra: more MANIFEST.json fields (a storage bundle's bundle_id,
+        git_sha and features)."""
         files = {"bin/boxd-worker": b"worker", "kernel/k.deb": b"kernel"}
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
@@ -92,7 +95,8 @@ class Bucket:
             manifest = json.dumps({
                 "git_sha": sha, "computer_image": {"name": "c", "tag": "t"},
                 "host_kernel": {"release": "6.17.0-boxd+"},
-                "files": {rel: hashlib.sha256(d).hexdigest() for rel, d in files.items()}}).encode()
+                "files": {rel: hashlib.sha256(d).hexdigest() for rel, d in files.items()},
+                **(manifest_extra or {})}).encode()
             zf.writestr("boxd-assets/MANIFEST.json", manifest)
             for name, data in (extra_entries or {}).items():
                 zf.writestr(name, data)

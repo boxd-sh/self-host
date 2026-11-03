@@ -42,7 +42,7 @@ def cmd_validate(args) -> int:
     # A [license].key_file that is missing or not a key stops here. No
     # terraform state here: workers without machine_type count as new ones.
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
-                + config.network_warnings(cfg))
+                + config.network_warnings(cfg) + config.storage_bundle_warnings(cfg))
     for warning in warnings:
         log(f"warning: {warning}")
     print("cluster.toml OK")
@@ -85,6 +85,7 @@ def _apply(cfg, args) -> int:
         ansible.check_hosts(cfg, state.deploy_pubkey())
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
+    check_storage_bundle(cfg, assets_root)
     assets.console_tarball(assets_root)
 
     # metal: the hosts exist, so there is nothing to plan or replace.
@@ -179,6 +180,22 @@ def _apply(cfg, args) -> int:
             "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
             "  ./boxd-install state reset-eab\n  ./boxd-install apply")
     return 0
+
+def check_storage_bundle(cfg, assets_root: str) -> None:
+    """[storage_engine] needs a bundle built with the storage engine (its
+    manifest's features list "bucket"). Fail closed: a bundle that doesn't say
+    so is refused, every bundle from before the field included, so a cluster
+    meant to keep machines in a bucket never starts on file-only workers."""
+    if "storage_engine" not in cfg.doc:
+        return
+    if "bucket" not in assets.features(assets_root):
+        raise InstallError(
+            f"[storage_engine] needs a storage bundle, and {cfg.assets_version[:12]} is a "
+            "file-only one (its manifest lists no \"bucket\" feature). Set "
+            '[cluster].assets_version = "storage/latest" (or a storage bundle\'s id), or remove '
+            "[storage_engine]")
+    raise InstallError("[storage_engine]: this installer checks for a storage bundle but doesn't "
+                       "configure the storage engine yet; that needs a newer installer")
 
 def check_network_mode(cfg, state) -> None:
     """Refuse to switch an existing cluster's [network] mode (bridge <->
