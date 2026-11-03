@@ -742,6 +742,17 @@ source ~/.boxd-<cluster>.env
 - **A 40-character version id** (a git sha): the cluster stays on exactly
   that release until you change it. Use this if every upgrade must be a
   planned change.
+- **`"storage/latest"`**: the newest storage bundle. boxd builds each release
+  twice: the standard bundle, and a storage bundle whose workers also run the
+  storage engine (machines' disks in an object store bucket, a licensed
+  feature). A storage bundle has a version id of its own, not the commit's.
+
+A storage bundle is what `[storage_engine]` needs. `apply` refuses
+`[storage_engine]` with a standard bundle (the bundle's manifest lists no
+`bucket` feature), and `validate` warns when `[storage_engine]` comes with a
+channel other than `storage/*`. This release only reserves the table: an empty
+`[storage_engine]` passes validation, and `apply` stops after the bundle check
+because configuring the engine needs a newer installer.
 
 Every `apply` prints the version it installed (`Assets: <sha> (channel latest)`)
 and records it in the installer state. Note it down: it's the exact value to

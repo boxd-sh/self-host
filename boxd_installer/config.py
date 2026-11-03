@@ -14,7 +14,7 @@ KNOWN_ROLES = {"control", "worker", "proxy", "console", "dns", "metrics"}
 SERVICE_TABLES = {
     "control", "worker", "proxy", "dns", "names", "acme",
     "github", "google", "oidc", "resend", "analytics", "backups",
-    "automations", "templates", "snapshot_archive",
+    "automations", "templates", "snapshot_archive", "storage_engine",
 }
 INSTALLER_TABLES = {"cluster", "network", "nodes", "license", "telemetry"} | set(clouds.CLOUDS)
 ACME_CAS = ("gts", "zerossl", "local")
@@ -22,7 +22,9 @@ PRIVATE_NET = ipaddress.ip_network("10.0.0.0/8")
 SHA_RE = r"[0-9a-f]{40}"
 # A channel boxd publishes (e.g. `latest`); resolved to a sha at apply time by
 # assets.resolve.
-CHANNEL_RE = r"[a-z][a-z0-9-]{0,39}"
+# One optional "/" part: the storage bundles' channels are "storage/latest"
+# and "storage/beta".
+CHANNEL_RE = r"[a-z][a-z0-9-]{0,39}(/[a-z][a-z0-9-]{0,39})?"
 TOP_SCALARS: set[str] = set()
 
 # The prewarmed template sizes when [templates].sizes is absent. Always
@@ -103,6 +105,16 @@ OIDC_KEYS = set(OIDC_REQUIRED) | {"ca_cert", "bootstrap_admin", "link_email_doma
 # The object-store fields [snapshot_archive] takes from terraform (AWS) or
 # the providers config; cluster.toml only names the folder.
 ARCHIVE_STORE_KEYS = ("endpoint", "bucket", "region", "access_key", "secret_key")
+
+def storage_bundle_warnings(cfg) -> list[str]:
+    """What validate can tell without downloading the bundle: [storage_engine]
+    with a channel other than storage/* most likely names a file-only bundle,
+    which apply refuses. A pinned id can't be judged here."""
+    v = cfg.doc["cluster"]["assets_version"]
+    if "storage_engine" not in cfg.doc or re.fullmatch(SHA_RE, v) or v.startswith("storage/"):
+        return []
+    return [f'[storage_engine] with assets_version = "{v}": the storage engine comes only in '
+            'storage bundles ("storage/latest"), so apply will most likely refuse this one']
 
 def network_warnings(cfg) -> list[str]:
     """Routed mode is what live migration needs, and live migration moves
@@ -273,7 +285,14 @@ def _validate(doc: dict) -> None:
     av = doc["cluster"]["assets_version"]
     if not (isinstance(av, str) and (re.fullmatch(SHA_RE, av) or re.fullmatch(CHANNEL_RE, av))):
         errs.append("[cluster].assets_version must be a 40-hex git sha (pinned) or a "
-                    'channel name like "dev" (the latest bundle published to it)')
+                    'channel name like "dev" or "storage/latest" (the latest bundle '
+                    "published to it)")
+    if isinstance(se := doc.get("storage_engine"), dict) and se:
+        errs.append(f"[storage_engine] {', '.join(sorted(se))}: this installer turns the storage "
+                    "engine on with an empty [storage_engine] table only; its settings need a "
+                    "newer installer")
+    elif "storage_engine" in doc and not isinstance(se, dict):
+        errs.append("[storage_engine] must be a table")
     if "org_name" in doc["cluster"] and (why := org_name_error(doc["cluster"]["org_name"])):
         errs.append(f"[cluster].org_name {why}")
 

@@ -438,8 +438,9 @@ def _extract(tmp_zip: str, sha: str, dest: str, *, manifest_sha256: str | None =
             raise InstallError(f"assets {sha[:8]}: MANIFEST.json is not the one its signed "
                                "release.json names. Nothing was installed.")
         manifest = _load_manifest(inner)
-        if manifest["git_sha"] != sha:
-            raise InstallError(f"assets manifest sha {manifest['git_sha']} != pinned {sha}")
+        if bundle_id(manifest) != sha:
+            raise InstallError(f"assets manifest is for bundle {bundle_id(manifest)} "
+                               f"(boxd commit {manifest['git_sha']}), not the pinned {sha}")
         verify_manifest(inner)
         for name, data in (extra or {}).items():
             with open(os.path.join(inner, name), "wb") as fh:
@@ -457,6 +458,19 @@ def _extract(tmp_zip: str, sha: str, dest: str, *, manifest_sha256: str | None =
 def _load_manifest(root: str) -> dict:
     with open(os.path.join(root, "MANIFEST.json")) as fh:
         return json.load(fh)
+
+def bundle_id(manifest: dict) -> str:
+    """What a bundle is pinned and published by. boxd makes two bundles of
+    one commit: the file-only one keeps the commit sha as its id, and the
+    bucket one (the storage engine) gets an id of its own. A manifest from
+    before the split has no bundle_id: its id is its git_sha."""
+    return manifest.get("bundle_id", manifest["git_sha"])
+
+def features(root: str) -> list[str]:
+    """The paid features a bundle's binaries are built with ("bucket": the
+    storage engine). A manifest from before the field has none."""
+    got = _load_manifest(root).get("features", [])
+    return [f for f in got if isinstance(f, str)] if isinstance(got, list) else []
 
 def verify_manifest(root: str) -> None:
     manifest = _load_manifest(root)

@@ -30,11 +30,11 @@ class Response(io.BytesIO):
 
 class Validation(unittest.TestCase):
     def test_sha_and_channel_names_are_valid(self):
-        for v in (SHA, "dev", "staging", "rc-2"):
+        for v in (SHA, "dev", "staging", "rc-2", "storage/latest", "storage/beta", "dev/latest"):
             config._validate(doc(v))
 
     def test_anything_else_is_refused(self):
-        for v in ("Dev", "dev/latest", "", "957e5c5a", "-dev", 3):
+        for v in ("Dev", "", "957e5c5a", "-dev", 3, "a/b/c", "/x", "x/", "Storage/x", "storage/"):
             with self.assertRaisesRegex(InstallError, "40-hex git sha .pinned. or a channel"):
                 config._validate(doc(v))
 
