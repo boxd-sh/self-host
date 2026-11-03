@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import base64
 import contextlib
+import copy
 import hashlib
 import http.client
 import io
@@ -67,6 +68,8 @@ class Bucket:
     def __init__(self, root: str):
         self.base = os.path.join(root, "bucket")
         self.root = os.path.join(self.base, assets.download_id(KEY))
+        # boxd's release bucket, for a cluster without a key (as_public).
+        self.public = os.path.join(root, "public")
         self.keys = os.path.join(root, "keys")
         os.makedirs(self.keys)
         self.key = os.path.join(root, "signing.pem")
@@ -74,6 +77,12 @@ class Bucket:
         subprocess.run(["openssl", "pkey", "-in", self.key, "-pubout",
                         "-out", os.path.join(self.keys, "1.pem")], check=True)
         self.tmp = root
+
+    def as_public(self) -> "Bucket":
+        """The same signer, writing into the release bucket."""
+        b = copy.copy(self)
+        b.root = self.public
+        return b
 
     def put(self, name: str, data: bytes) -> None:
         path = os.path.join(self.root, name)
@@ -145,7 +154,8 @@ class Case(unittest.TestCase):
         self.cluster_dir = key_dir(self.tmp.name)
         env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
         for p in (mock.patch.dict(os.environ, env, clear=True),
-                  mock.patch.object(assets, "BASE_URL", "file://" + self.bucket.base),
+                  mock.patch.object(assets, "LICENSE_URL", "file://" + self.bucket.base),
+                  mock.patch.object(assets, "PUBLIC_URL", "file://" + self.bucket.public),
                   mock.patch.object(assets, "KEYS_DIR", self.bucket.keys),
                   contextlib.redirect_stderr(io.StringIO())):
             p.__enter__()
@@ -232,13 +242,28 @@ class GoodBundles(Case):
         self.assertNotIn(assets.download_id(KEY + "-other"), str(cm.exception))
         self.assertFalse(self.unpacked())
 
-    def test_no_key_stops_before_any_download(self):
+    def test_without_a_key_the_release_bucket(self):
+        """A cluster without a license key follows boxd's release bucket, as
+        before, and nodes download from it."""
+        public = self.bucket.as_public()
+        public.bundle()
+        public.channel("latest", SHA, 2)
         cfg = config.Config(doc("latest"), self.tmp.name)
         cfg.doc.pop("license")
-        with mock.patch.object(assets.urllib.request, "urlopen",
-                               mock.Mock(side_effect=AssertionError("no download"))):
-            with self.assertRaisesRegex(InstallError, "has no license key"):
-                assets.ensure(cfg, self.cache, self.state)
+        root = assets.ensure(cfg, self.cache, self.state)
+        self.assertEqual(cfg.assets_version, SHA)
+        self.assertTrue(os.path.exists(os.path.join(root, "MANIFEST.json")))
+        self.assertEqual(assets.zip_url(cfg, SHA),
+                         f"file://{self.bucket.public}/bundles/{SHA}/boxd-assets-{SHA}.zip")
+        self.assertFalse(os.path.exists(self.bucket.root), "nothing read from a license path")
+
+    def test_a_key_never_falls_back_to_the_release_bucket(self):
+        public = self.bucket.as_public()
+        public.bundle()
+        public.channel("latest", SHA, 1)
+        with self.assertRaises(assets.DownloadFailed):
+            self.ensure("latest")
+        self.assertFalse(self.unpacked())
 
     def test_the_path_is_never_printed(self):
         """Nothing the installer logs while installing names the license
@@ -801,7 +826,7 @@ class CutOff(Case):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        p = mock.patch.object(assets, "BASE_URL", f"http://127.0.0.1:{server.server_address[1]}")
+        p = mock.patch.object(assets, "LICENSE_URL", f"http://127.0.0.1:{server.server_address[1]}")
         p.start()
         self.addCleanup(p.stop)
 
@@ -944,12 +969,32 @@ class NoNetworkOrKeys(unittest.TestCase):
                 self.assertIn("assets_version", str(cm.exception))
                 self.assertEqual("[license] key_file" in str(cm.exception), private)
 
+    def test_the_release_bucket_keeps_its_hint(self):
+        """Without a key: 401/403 is the release bucket refusing, 404 a
+        version it doesn't have."""
+        cfg = config.Config(doc("latest"), self.tmp.name)
+        cfg.doc.pop("license")
+        env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
+        for code, private in ((403, True), (401, True), (404, False)):
+            with self.subTest(code):
+                err = urllib.error.HTTPError("u", code, "x", {}, None)
+                with mock.patch.dict(os.environ, env, clear=True), \
+                        mock.patch.object(assets.urllib.request, "urlopen", mock.Mock(side_effect=err)), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(assets.DownloadFailed) as cm:
+                        assets.resolve(cfg, None)
+                self.assertIs(cm.exception.private, private)
+                self.assertIn("assets_version", str(cm.exception))
+                self.assertEqual("sets BOXD_PRODUCT_LICENSE (the old download path)" in str(cm.exception),
+                                 private)
+                self.assertNotIn("license key", str(cm.exception))
+
     def test_an_unreachable_bucket_does_not_print_the_path(self):
         env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
         cfg = self.cfg()
         missing = os.path.join(self.tmp.name, "nowhere")
         with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(assets, "BASE_URL", "file://" + missing), \
+                mock.patch.object(assets, "LICENSE_URL", "file://" + missing), \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(assets.DownloadFailed) as cm:
                 assets.resolve(cfg, None)

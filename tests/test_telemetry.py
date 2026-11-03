@@ -32,8 +32,6 @@ def with_telemetry(enabled: bool, key_file: bool = True) -> dict:
     doc["telemetry"] = {"enabled": enabled}
     if key_file:
         doc["license"] = {"key_file": "license.key"}
-    else:
-        doc.pop("license", None)
     return doc
 
 
@@ -280,12 +278,8 @@ class ValidateCommand(Isolated):
         self.assertIn("apply leaves the cluster's setting as it is", out)
 
     def test_customer_default_off_without_a_key_warns(self):
-        """Only a cluster on the old download path has no key file."""
         self.write_defaults(False)
-        doc = aws_doc()
-        doc.pop("license")
-        with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": "ab" * 32}):
-            out, logs = self.validate_out(doc)
+        out, logs = self.validate_out(aws_doc())
         self.assertIn("apply turns it off (this installer's default", out)
         self.assertTrue(any("there is no [license] key_file" in l for l in logs), logs)
 

@@ -53,11 +53,10 @@ interface = "eno2"
 contact_email = "ops@example.com"
 
 [license]
-# CHANGE. The file with your boxd license key, next to this one (it is
-# git-ignored). boxd releases are downloaded with it, so every cluster needs
-# one. A key without unlimited worker vCPUs is the boxd free tier: up to 16
-# worker vCPUs. apply installs the key on every run. README "License key".
-key_file = "license.key"
+# Optional. The file with your boxd license key, next to this one (it is
+# git-ignored). Without a key the cluster has the boxd free tier: up to 16
+# worker vCPUs (the logical CPUs of the worker hosts). README "License key".
+# key_file = "license.key"
 
 [telemetry]
 # The cluster sends boxd one usage report an hour: counts only, no personal

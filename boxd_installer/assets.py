@@ -1,13 +1,15 @@
 """Ensure the versioned assets zip is downloaded, verified and extracted at
 state/assets/<sha>/.
 
-boxd publishes the releases of each license under a path made from its
-license key (base_url), one bundle per release:
+A cluster without a license key downloads from boxd's release bucket. A
+cluster with one downloads the releases boxd publishes for that key, under a
+path made from it (base_url). Both have the same layout, one bundle per
+release:
     bundles/<id>/boxd-assets-<id>.zip, release.json, release.json.sig
     channels/<channel>, channels/<channel>.<sequence>.sig
 Every signature is checked with `openssl pkeyutl -verify -rawin` against the
-public keys in release-keys/ before anything is unpacked. The path is made
-from the key, so it is as secret as the key: never log or print it.
+public keys in release-keys/ before anything is unpacked. A license's path is
+made from its key, so it is as secret as the key: never log or print it.
 
 A cluster installed before license keys sets BOXD_PRODUCT_LICENSE and keeps
 its old download path (the _legacy_* functions) until it is moved. That key
@@ -29,10 +31,14 @@ import zipfile
 from . import license
 from .util import InstallError, log
 
-# Where boxd publishes the releases of every license, each under its own
-# path (base_url). BOXD_RELEASES_URL: a copy of it (file:// works), to test
-# a bundle. The signatures are checked all the same.
-BASE_URL = os.environ.get("BOXD_RELEASES_URL", "https://storage.googleapis.com/self-host-assets").rstrip("/")
+# BOXD_RELEASES_URL: a copy of boxd's releases (file:// works), to test a
+# bundle; it stands for both places below. The signatures are checked all
+# the same.
+_COPY = os.environ.get("BOXD_RELEASES_URL", "").rstrip("/")
+# Without a license key: boxd's release bucket.
+PUBLIC_URL = _COPY or "https://storage.googleapis.com/boxd-releases"
+# With one: the releases of every license, each under its own path (base_url).
+LICENSE_URL = _COPY or "https://storage.googleapis.com/self-host-assets"
 # The context prefix of a download path: the path names the key's releases
 # without giving the key away.
 DOWNLOAD_PREFIX = b"boxd-download-v1\0"
@@ -54,15 +60,16 @@ def download_id(key: str) -> str:
     return hashlib.sha256(DOWNLOAD_PREFIX + key.strip().encode()).hexdigest()
 
 def base_url(cfg) -> str:
-    """Where this cluster's releases are: BASE_URL/<download_id(key)>. It
-    carries a secret: never log or print it."""
-    return f"{BASE_URL}/{download_id(license.key_text(cfg))}"
+    """Where this cluster's releases are: with a license key,
+    LICENSE_URL/<download_id(key)>, which carries a secret (never log or
+    print it); without one, PUBLIC_URL."""
+    if license.key_path(cfg) is None:
+        return PUBLIC_URL
+    return f"{LICENSE_URL}/{download_id(license.key_text(cfg))}"
 
-def require_key(cfg) -> None:
-    """Stop when there is no license key to download releases with (the old
-    path downloads with BOXD_PRODUCT_LICENSE instead)."""
-    if not _legacy():
-        license.key_text(cfg)
+def _licensed(url: str) -> bool:
+    """url is in a license's path: the download id follows LICENSE_URL."""
+    return re.match(re.escape(LICENSE_URL) + r"/[0-9a-f]{64}(/|$)", url) is not None
 
 def resolve(cfg, state) -> str:
     """Turn a channel `assets_version` ("latest") into the sha it points at.
@@ -158,9 +165,14 @@ class UnknownKey(CannotCheck):
     download: update the installer. From the local cache: the cache is
     damaged (_signed_cache_problem)."""
 
-# GCS answers 403 for an object it won't serve, and for one that isn't
-# there: either way, nothing is published for this key under that name.
-PRIVATE_HINT = (" — boxd has published no such release for this license key. Check that "
+# GCS answers 401/403 when the bucket refuses the download.
+PRIVATE_HINT = (" — the boxd release bucket refused the download; if it persists, tell boxd. "
+                "A cluster installed before the release bucket sets BOXD_PRODUCT_LICENSE "
+                "(the old download path) until your boxd contact moves it")
+# A license's path answers 403 for an object it won't serve and for one
+# that isn't there: either way, nothing is published for this key under
+# that name.
+LICENSE_HINT = (" — boxd has published no such release for this license key. Check that "
                 "[license] key_file holds the key boxd sent you, and [cluster].assets_version; "
                 "if both are right, ask your boxd contact")
 
@@ -172,9 +184,14 @@ class DownloadFailed(InstallError):
         super().__init__(msg)
         self.private = private
 
-def _http_error(what: str, e: urllib.error.HTTPError) -> DownloadFailed:
-    private = e.code in (401, 403, 404)
-    return DownloadFailed(f"{what}: download failed ({e.code})" + (PRIVATE_HINT if private else ""), private)
+def _http_error(what: str, e: urllib.error.HTTPError, url: str) -> DownloadFailed:
+    if _licensed(url):
+        private = e.code in (401, 403, 404)
+        hint = LICENSE_HINT
+    else:
+        private = e.code in (401, 403)
+        hint = PRIVATE_HINT
+    return DownloadFailed(f"{what}: download failed ({e.code})" + (hint if private else ""), private)
 
 def _get(url: str, what: str, limit: int | None = None) -> bytes:
     # Channels are published no-store; the header asks any cache between here
@@ -185,7 +202,7 @@ def _get(url: str, what: str, limit: int | None = None) -> bytes:
             data = resp.read(limit) if limit else resp.read()
             length = resp.headers.get("Content-Length")
     except NETWORK_ERRORS as e:
-        raise _download_error(what, e)
+        raise _download_error(what, e, url)
     # A connection closed early can end the body without an error: shorter
     # than its Content-Length is a cut-off download, not a bad file.
     if length and length.isdigit():
@@ -199,9 +216,9 @@ def _get(url: str, what: str, limit: int | None = None) -> bytes:
 # dropped (http.client.RemoteDisconnected, IncompleteRead, a reset).
 NETWORK_ERRORS = (http.client.HTTPException, OSError)
 
-def _download_error(what: str, e: Exception) -> DownloadFailed:
+def _download_error(what: str, e: Exception, url: str) -> DownloadFailed:
     if isinstance(e, urllib.error.HTTPError):
-        return _http_error(what, e)
+        return _http_error(what, e, url)
     if isinstance(e, urllib.error.URLError):
         return DownloadFailed(f"{what}: download failed ({_no_url(e.reason)})")
     return DownloadFailed(f"{what}: download failed ({type(e).__name__}: {_no_url(e)})")
@@ -275,11 +292,11 @@ def _signed_resolve(base: str, channel: str, state) -> str:
     try:
         body = _get(f"{base}/channels/{channel}", what, 4096)
     except DownloadFailed as e:
-        if e.private:
-            raise
+        if e.private and _licensed(base):
+            raise  # the hint names assets_version already
         raise DownloadFailed(
             f"{e} — check [cluster].assets_version (\"latest\", or a release id from your "
-            "release notes), or ask your boxd contact")
+            "release notes), or ask your boxd contact", e.private)
     try:
         p = json.loads(body)
         seq = p["sequence"]
@@ -384,13 +401,13 @@ def _signed_download(base: str, sha: str, tmp_zip: str) -> tuple[bytes, bytes, d
         try:
             resp = urllib.request.urlopen(f"{base}/{z['name']}")
         except NETWORK_ERRORS as e:
-            raise _download_error(what, e)
+            raise _download_error(what, e, base)
         with resp:
             while True:
                 try:
                     chunk = resp.read(1 << 20)
                 except NETWORK_ERRORS as e:
-                    raise _download_error(what, e)
+                    raise _download_error(what, e, base)
                 if not chunk:
                     break
                 h.update(chunk)

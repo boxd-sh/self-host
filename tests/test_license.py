@@ -1,7 +1,7 @@
-"""[license] key_file: validation, the key file check (every cluster needs
-one), the free tier warning, the worker type (an existing worker keeps its
-type; a new one on the free tier gets the free type), and `boxd-ctl license
-install` on apply. Run: python3 -m unittest discover -s tests"""
+"""[license] key_file: validation, the key file check, the
+free tier warning, the worker type (an existing worker keeps its type; a new
+one without a key gets the free type), and `boxd-ctl license install` on
+apply. Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import contextlib
 import io
@@ -20,15 +20,11 @@ from boxd_installer import ansible, config, license, main, telemetry, tf
 from boxd_installer.util import InstallError
 
 from test_machine_sizes import FakeState, aws_doc, validate
-from test_telemetry import key_text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AWS_WORKER = "boxd-aws-demo-worker-0"
 # Shaped like a key; control would refuse it, which these tests never reach.
-# It decodes to no features: the free tier.
 KEY = "boxd-lic1_not-a-real-key\n"
-# A key with unlimited worker vCPUs (feature 1).
-UNLIMITED = key_text([1])
 
 
 def gcp_doc() -> dict:
@@ -41,13 +37,9 @@ def worker(doc: dict) -> dict:
 
 
 def without_type(doc: dict, key_file: bool = True) -> dict:
-    """key_file=False: no [license] at all (a cluster on the old download
-    path, which has no key file)."""
     worker(doc).pop("machine_type", None)
     if key_file:
         doc["license"] = {"key_file": "license.key"}
-    else:
-        doc.pop("license", None)
     return doc
 
 
@@ -56,8 +48,6 @@ class LicenseCluster(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="license-")
-        # Every cluster has a key; this one is the free tier's.
-        self.write_key()
         # The real customer defaults file exists in a customer tree.
         patcher = mock.patch.object(telemetry, "CUSTOMER_DEFAULTS",
                                     os.path.join(self.dir, "customer_defaults.toml"))
@@ -74,9 +64,8 @@ class LicenseCluster(unittest.TestCase):
         return path
 
     def cfg(self, doc: dict, key: bool = False) -> config.Config:
-        """key: the key file holds a key with unlimited worker vCPUs."""
         if key:
-            self.write_key(UNLIMITED)
+            self.write_key()
         return config.Config(doc, self.dir)
 
     def tfvars_types(self, cfg, existing=None) -> dict:
@@ -124,7 +113,6 @@ class KeyFile(LicenseCluster):
         return str(e.exception)
 
     def test_missing_file_is_an_error(self):
-        os.remove(os.path.join(self.dir, "license.key"))
         self.assertIn("[license].key_file license.key does not exist", self.error())
 
     def test_download_key_is_refused(self):
@@ -251,9 +239,7 @@ class Destroy(LicenseCluster):
 
     def test_destroy_tfvars_skip_the_license(self):
         for text in (None, "not a key\n"):
-            if text is None:
-                os.remove(os.path.join(self.dir, "license.key"))
-            else:
+            if text is not None:
                 self.write_key(text)
             cfg = self.cfg(without_type(aws_doc()))
             with self.assertRaises(InstallError):
@@ -267,7 +253,6 @@ class Destroy(LicenseCluster):
             self.assertIsNone({n["name"]: n["machine_type"] for n in fresh["nodes"]}[AWS_WORKER])
 
     def test_cmd_destroy_with_a_missing_key_file(self):
-        os.remove(os.path.join(self.dir, "license.key"))
         doc = without_type(aws_doc())
         path = os.path.join(self.dir, "cluster.toml")
         cfg = config.Config(doc, self.dir)
@@ -316,7 +301,7 @@ class Warnings(LicenseCluster):
             worker(doc)["machine_type"] = t
             warnings = license.free_tier_warnings(self.cfg(doc))
             self.assertEqual(len(warnings), 1, t)
-            self.assertIn("the workers have 32 vCPUs, and the boxd free tier allows 16", warnings[0])
+            self.assertIn("the workers have 32 vCPUs and there is no license key", warnings[0])
             self.assertIn("refuses new machines while it is over the limit", warnings[0])
 
     def test_16_vcpu_worker_and_key_are_quiet(self):
@@ -346,20 +331,8 @@ class Warnings(LicenseCluster):
         self.assertIn(f"cannot count the vCPUs of {AWS_WORKER} (c7i.metal)", warnings[0])
 
     def test_missing_key_file_raises(self):
-        os.remove(os.path.join(self.dir, "license.key"))
         with self.assertRaises(InstallError):
             license.free_tier_warnings(self.cfg(without_type(aws_doc())))
-
-    def test_a_key_without_unlimited_vcpus_is_the_free_tier(self):
-        """A key that does not lift the limit (no features, or others only)
-        gets the free warning and the free worker type."""
-        for text in (KEY, key_text([2, 3])):
-            self.write_key(text)
-            doc = without_type(aws_doc())
-            worker(doc)["machine_type"] = "m8i.8xlarge"
-            self.assertIn("32 vCPUs", license.free_tier_warnings(self.cfg(doc))[0], text)
-            cfg = self.cfg(without_type(aws_doc()))
-            self.assertEqual(self.tfvars_types(cfg, {})[AWS_WORKER], "m8i.4xlarge", text)
 
 
 class ValidateCommand(LicenseCluster):
@@ -377,45 +350,27 @@ class ValidateCommand(LicenseCluster):
         with open(os.path.join(ROOT, "examples", "aws", "cluster.toml")) as fh:
             text = fh.read()
         text = text.replace('machine_type = "m8i.4xlarge"', 'machine_type = "m8i.8xlarge"', 1)
-        if not key_file:
-            text = text.replace('\nkey_file = "license.key"\n', "\n", 1)
+        if key_file:
+            text = text.replace('# key_file = "license.key"', 'key_file = "license.key"', 1)
         return text
 
-    def test_no_key_exits_1(self):
-        """boxd releases are downloaded with the license key: no key, no
-        install."""
+    def test_warns_and_exits_0_without_key(self):
         rc, out, err = self.run_validate(self.example(key_file=False))
-        self.assertEqual(rc, 1)
-        self.assertIn("cluster.toml has no license key", err)
-        self.assertIn('[license] key_file = "license.key"', err)
-        self.assertNotIn("cluster.toml OK", out)
-
-    def test_the_old_download_key_still_validates_without_a_key(self):
-        """A cluster on the old download path (BOXD_PRODUCT_LICENSE) has no
-        key file yet: it validates as before."""
-        with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": "ab" * 32}):
-            rc, out, err = self.run_validate(self.example(key_file=False))
-        self.assertEqual(rc, 0, err)
-        self.assertIn("cluster.toml OK", out)
-
-    def test_free_key_warns_and_exits_0(self):
-        rc, out, err = self.run_validate(self.example(key_file=True))
         self.assertEqual(rc, 0)
         self.assertIn("cluster.toml OK", out)
-        self.assertIn("warning: the workers have 32 vCPUs, and the boxd free tier allows 16", err)
+        self.assertIn("warning: the workers have 32 vCPUs and there is no license key", err)
         self.assertNotIn("as new ones", err, "every worker has a machine_type")
 
     def test_one_untyped_free_worker_is_quiet(self):
-        """One worker without machine_type on the free tier: the 16-vCPU
-        default, at the limit. No warning and no note."""
-        text = self.example(key_file=True).replace(
+        """One worker without machine_type, no key: the 16-vCPU default, at
+        the limit. No warning and no note."""
+        text = self.example(key_file=False).replace(
             'machine_type = "m8i.8xlarge"', "", 1)
         rc, out, err = self.run_validate(text)
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("cluster.toml OK", out)
 
     def test_missing_key_file_exits_1(self):
-        os.remove(os.path.join(self.dir, "license.key"))
         rc, out, err = self.run_validate(self.example(key_file=True))
         self.assertEqual(rc, 1)
         self.assertIn("[license].key_file license.key does not exist", err)
@@ -433,7 +388,7 @@ class ValidateCommand(LicenseCluster):
                       "`apply` counts the types that exist.", warnings[0])
 
     def test_quiet_with_key(self):
-        self.write_key(UNLIMITED)
+        self.write_key()
         rc, out, err = self.run_validate(self.example(key_file=True))
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("cluster.toml OK", out)
@@ -453,10 +408,10 @@ class InstallLicense(LicenseCluster):
         ssh, err = self.run_install(0, stdout="license key installed\nlicense:       valid\n")
         (cfg, host, command), kw = ssh.call_args
         self.assertEqual(command, "sudo boxd-ctl license install")
-        self.assertEqual(kw["input"], UNLIMITED)
+        self.assertEqual(kw["input"], KEY)
         self.assertEqual(host.name, "boxd-aws-demo-control-0")
         self.assertIn("license key installed: valid", err)
-        self.assertNotIn(UNLIMITED.strip(), err)
+        self.assertNotIn("not-a-real-key", err)
 
     def test_rejection_stops_the_apply_with_the_reason(self):
         with self.assertRaises(InstallError) as e:
@@ -571,7 +526,6 @@ class ApplyOrder(LicenseCluster):
         self.assertEqual(calls.write_tfvars.call_args[0][3], {AWS_WORKER: "m8i.8xlarge"})
 
     def test_missing_key_file_stops_before_terraform(self):
-        os.remove(os.path.join(self.dir, "license.key"))
         calls = mock.Mock()
         with self.assertRaises(InstallError) as e:
             self.apply(without_type(aws_doc()), {}, calls)

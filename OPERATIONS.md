@@ -339,8 +339,8 @@ your machines get don't count, and a worker marked dead doesn't count (but
 see [Retiring a worker for the free tier](#retiring-a-worker-for-the-free-tier)).
 Only a key with `unlimited-worker-vcpus` lifts the limit: `boxd-ctl license
 status` lists a key's features, and a valid key without that feature still
-leaves the limit in place. The installer installs the key in `[license]
-key_file` on every `apply` (see [License key](docs/REFERENCE.md#license-key)
+leaves the limit in place. With `[license] key_file` set, the installer
+installs the key on every `apply` (see [License key](docs/REFERENCE.md#license-key)
 in the reference).
 
 Telemetry can be turned off (`[telemetry] enabled = false`) only with a key
