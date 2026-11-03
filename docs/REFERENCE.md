@@ -183,33 +183,51 @@ because of the license). Set `machine_type` to change it.
 
 ### Telemetry
 
-Every boxd cluster sends boxd one usage report an hour, over HTTPS, from the
-control leader to `https://telemetry.boxd.sh/v1/report`. It has **no
-personal data**: counts only. A cluster that cannot reach boxd keeps working,
-and nothing waits for the report.
+Every boxd cluster sends boxd usage reports over HTTPS, from the control
+leader to `https://telemetry.boxd.sh/v1/report`. They have **no personal
+data** and nothing that identifies your machines. A cluster that cannot reach
+boxd keeps working, and nothing waits for a report.
 
-What it sends (the full list; the report has no other field):
+- **Without usage billing** (the free tier, and license keys without it): one
+  report an hour, with the counts below.
+- **With usage billing** (a license key that includes `usage-billing`): a
+  report every 5 minutes, signed with a token in the key, with the hosts the
+  cluster runs on and the 5-minute periods each was up (see "Usage billing"
+  below). The counts still go once an hour.
+
+Releases before boxd v2 send report format 1: the counts only, once an hour.
+
+What a report sends (the full list; a report has no other field):
 
 | Field | What |
 |---|---|
-| `format` | The report's version, `1` |
+| `format` | The report's version, `2` (`1` before boxd v2) |
 | `cluster_id` | The cluster's random ID (`boxd-ctl license status` shows it) |
 | `boxd_sha` | The boxd version (its commit) |
 | `sent_at` | When the report was built |
 | `license` | `none`, or the license ID, licensee, state and features of the key |
-| `workers` | For each worker: its CPU count, its host kernel version and its average CPU use over the hour. No names, no IDs, no IPs |
-| `worker_vcpus` | The worker vCPUs the free tier counts |
-| `nodes` | How many control nodes (Raft voters) and proxies; `dns` counts only DNS nodes registered with `boxd-ctl node add` (0 on an installer cluster, whose DNS nodes do not register) |
-| `usage` | How many users, orgs, machines (all, running), and the vCPUs of the running machines |
-| `location` | The cloud and the region from `cluster.toml` |
+| `counts.workers` | For each worker: its CPU count, its host kernel version and its average CPU use over the hour. No names, no IDs, no IPs |
+| `counts.worker_vcpus` | The worker vCPUs the free tier counts |
+| `counts.nodes` | How many control nodes (Raft voters) and proxies; `dns` counts only DNS nodes registered with `boxd-ctl node add` (0 on an installer cluster, whose DNS nodes do not register) |
+| `counts.usage` | How many users, orgs, machines (all, running), and the vCPUs of the running machines |
+| `counts.location` | The cloud and the region from `cluster.toml` |
+| `hosts` | Each host that runs control, a proxy, DNS or a worker (once, however many of them it runs): the fields below |
+| `hosts.host_key` | A 32-character key for the host: an HMAC of its instance ID (its `/etc/machine-id` off AWS) under a random salt that never leaves the cluster, so boxd cannot get the instance ID back from it |
+| `hosts.roles` | Which of control, proxy, dns and worker it runs |
+| `hosts.cloud`, `instance_type`, `partition`, `region`, `lifecycle` | On AWS: `aws`, the instance type (for example `m7i.2xlarge`), the partition (`aws`), the region, and `on-demand` or `spot`. Empty off AWS |
+| `hosts.launched_at` | When the instance last started (from AWS's instance identity document; the rest of that document is not sent) |
+| `hosts.imds_error` | When the host could not read these facts from the instance metadata service: a short code (`timeout`, `token`, ...) |
+| `hosts.buckets` | The 5-minute periods in which the host was up since the last report boxd accepted (up to 72 hours back), with the instance type, partition and region of each |
 
-It never sends names, emails, user or org IDs, machine names, the zone or IP
-addresses.
+`counts` is in one report an hour; the other reports carry only `hosts`.
+A report never sends names, emails, user or org IDs, machine names, the zone,
+IP or MAC addresses, the AWS account ID, instance IDs, AMI IDs, hostnames or
+tags.
 
 To see the exact report the cluster sends next, on a control node:
 
 ```bash
-sudo boxd-ctl telemetry show          # the report, whether it is on, the last send
+sudo boxd-ctl telemetry show          # the report, whether it is on, the last send, the hosts
 sudo boxd-ctl telemetry show --json   # the report only
 ```
 
@@ -230,6 +248,27 @@ the installer also writes `[telemetry] default_enabled = false` into the
 control nodes' config before it (re)starts them, so control does not send a
 report before `apply` reaches `telemetry off`. On the free tier,
 telemetry is always on. When a key with opt-out expires, telemetry stays off.
+
+#### Usage billing
+
+With a license key that includes `usage-billing`, boxd bills the cluster a
+share of what its instances would cost on demand, from its reports: each host
+that runs control, a proxy, DNS or a worker, for each 5-minute period it was
+up, at the AWS on-demand Linux list price of its instance type and region (a
+spot instance at the on-demand price too). EBS volumes are not billed.
+
+- Telemetry can't be turned off: such a key never includes telemetry opt-out,
+  and `validate` refuses `[telemetry] enabled = false` with it.
+- Each node reads its instance type, partition, region and lifecycle from the
+  instance metadata service (IMDSv2) at every report, and nothing else. The
+  installer's terraform requires IMDSv2 tokens with a hop limit of 1, so the
+  machines on your workers cannot reach it; keep it that way.
+- Reports are signed with a token in the license key, so nobody else can send
+  reports for your cluster.
+- A cluster that can't reach boxd for a while loses nothing: it keeps the
+  last 72 hours of 5-minute periods and sends them when it can again.
+- `boxd-ctl telemetry show` lists each host, its instance type and how many
+  periods the next report carries, and says whether reports are signed.
 
 ### Providers (secrets)
 

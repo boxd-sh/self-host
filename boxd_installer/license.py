@@ -11,6 +11,7 @@ boxd never stops a VM because of the license, so the license
 never resizes a worker that exists: the free default type is only for
 workers terraform has not created yet.
 """
+import base64
 import os
 import re
 
@@ -82,6 +83,105 @@ def key_path(cfg) -> str | None:
         raise InstallError(f"[license].key_file {shown} is not a license key: it must hold "
                            "one line that starts with boxd-lic")
     return path
+
+
+# The features a key can carry, by their number in the key. The numbers are
+# fixed by boxd's license format and never reused.
+FEATURE_NAMES = {
+    1: "unlimited-worker-vcpus",
+    2: "telemetry-opt-out",
+    3: "bucket-storage",
+    4: "usage-billing",
+}
+USAGE_BILLING = "usage-billing"
+
+
+def _varint(data: bytes, i: int) -> tuple[int, int]:
+    value, shift = 0, 0
+    while True:
+        if i >= len(data) or shift > 63:
+            raise ValueError("truncated varint")
+        b = data[i]
+        i += 1
+        value |= (b & 0x7F) << shift
+        if b < 0x80:
+            return value, i
+        shift += 7
+
+
+def _fields(data: bytes):
+    """The (number, wire type, value) of each protobuf field in `data`:
+    varints as int, length-delimited as bytes. Other wire types are skipped."""
+    i = 0
+    while i < len(data):
+        tag, i = _varint(data, i)
+        number, wire = tag >> 3, tag & 7
+        if wire == 0:
+            value, i = _varint(data, i)
+        elif wire == 2:
+            n, i = _varint(data, i)
+            if i + n > len(data):
+                raise ValueError("truncated field")
+            value, i = data[i:i + n], i + n
+        elif wire == 1:
+            value, i = None, i + 8
+        elif wire == 5:
+            value, i = None, i + 4
+        else:
+            raise ValueError(f"wire type {wire}")
+        yield number, wire, value
+
+
+def key_payload(text: str) -> dict | None:
+    """What a key's text says about itself, NOT verified (control checks the
+    signature): its format version, its feature names, and whether it carries
+    a usage-billing report token. None when the text doesn't decode."""
+    text = text.strip()
+    if not _KEY_RE.fullmatch(text):
+        return None
+    body = text.split("_", 1)[1]
+    try:
+        signed = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+        payload = next((v for n, w, v in _fields(signed) if n == 2 and w == 2), None)
+        if payload is None:
+            return None
+        out = {"format": 0, "features": set(), "report_token": False}
+        for number, wire, value in _fields(payload):
+            if number == 1 and wire == 0:
+                out["format"] = value
+            elif number == 10 and wire == 0:
+                out["features"].add(FEATURE_NAMES.get(value, f"feature-{value}"))
+            elif number == 10 and wire == 2:  # packed
+                j = 0
+                while j < len(value):
+                    f, j = _varint(value, j)
+                    out["features"].add(FEATURE_NAMES.get(f, f"feature-{f}"))
+            elif number == 11 and wire == 2:
+                out["report_token"] = len(value) == 32
+        return out
+    except (ValueError, TypeError):
+        return None
+
+
+def key_features(cfg) -> set[str]:
+    """The feature names of the configured key, unverified; empty without
+    [license].key_file or when the file can't be read or decoded (key_path
+    reports a bad file on its own)."""
+    path = key_file(cfg)
+    if path is None or not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, errors="replace") as fh:
+            payload = key_payload(fh.read())
+    except OSError:
+        return set()
+    return payload["features"] if payload else set()
+
+
+def usage_billing(cfg) -> bool:
+    """The configured key bills the cluster on its usage: its telemetry
+    reports are what boxd bills from, so telemetry can't be turned off."""
+    return USAGE_BILLING in key_features(cfg)
 
 
 def vcpus(cloud: str, machine_type: str) -> int | None:

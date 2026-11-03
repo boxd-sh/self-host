@@ -141,7 +141,9 @@ put it in a file next to `cluster.toml` and run `apply` again.
   instead.
 - **Telemetry.** Each cluster sends boxd one usage report an hour, with counts
   only and no personal data. Only a license key with telemetry opt-out lets
-  you [turn it off](docs/REFERENCE.md#telemetry).
+  you [turn it off](docs/REFERENCE.md#telemetry). With a usage-billing license
+  key, the cluster also reports every 5 minutes which instance types it runs
+  on and when, which is what it is billed on; telemetry then stays on.
 
 ## Documentation
 

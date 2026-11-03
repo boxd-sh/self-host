@@ -41,6 +41,8 @@ def cmd_validate(args) -> int:
             "project or account can collide; rename them before the first apply.")
     # A [license].key_file that is missing or not a key stops here. No
     # terraform state here: workers without machine_type count as new ones.
+    if errs := telemetry.errors(cfg):
+        raise InstallError("; ".join(errs))
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
                 + config.network_warnings(cfg) + config.storage_bundle_warnings(cfg))
     for warning in warnings:
@@ -71,6 +73,8 @@ def _apply(cfg, args) -> int:
     # Before anything else: a [license].key_file that is missing or not a
     # key stops the apply; it never falls back to the free tier.
     key = license.key_path(cfg)
+    if errs := telemetry.errors(cfg):
+        raise InstallError("; ".join(errs))
     state = State(args.state_dir)
     # The render would refuse a half-configured [oidc] only after terraform.
     oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}

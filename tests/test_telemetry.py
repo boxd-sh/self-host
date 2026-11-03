@@ -339,5 +339,95 @@ class Isolation(unittest.TestCase):
                             f"{os.path.basename(path)}: first import must be _isolation")
 
 
+
+def key_text(features: list[int], token: bool = False, packed: bool = True) -> str:
+    """A key's text with these feature numbers, shaped as boxd signs them (a
+    SignedLicense around a LicenseData), with a zero signature: the installer
+    decodes it, control would refuse it."""
+    import base64
+
+    def varint(n: int) -> bytes:
+        out = b""
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            if n:
+                out += bytes([b | 0x80])
+            else:
+                return out + bytes([b])
+
+    def field(number: int, wire: int, value) -> bytes:
+        tag = varint(number << 3 | wire)
+        if wire == 0:
+            return tag + varint(value)
+        return tag + varint(len(value)) + value
+
+    data = field(1, 0, 1) + field(2, 2, b"\x5a" * 16) + field(3, 2, b"example-co")
+    data += field(5, 0, 4_102_444_800)
+    if packed:
+        data += field(10, 2, b"".join(varint(f) for f in features)) if features else b""
+    else:
+        data += b"".join(field(10, 0, f) for f in features)
+    if token:
+        data += field(11, 2, b"\x07" * 32)
+    signed = field(1, 0, 7) + field(2, 2, data) + field(3, 2, b"\0" * 64)
+    return "boxd-lic1_" + base64.urlsafe_b64encode(signed).decode().rstrip("=") + "\n"
+
+
+class UsageBilling(Isolated):
+    """A license key with usage billing (feature 4): telemetry can't be turned
+    off with it."""
+
+    def cfg(self, doc: dict, features: list[int]) -> config.Config:
+        with open(os.path.join(self.dir, "license.key"), "w") as fh:
+            fh.write(key_text(features, token=4 in features))
+        return config.Config(doc, self.dir)
+
+    def test_the_key_payload_decodes(self):
+        from boxd_installer import license
+        p = license.key_payload(key_text([1, 4], token=True))
+        self.assertEqual(p, {"format": 1, "features": {"unlimited-worker-vcpus", "usage-billing"},
+                             "report_token": True})
+        p = license.key_payload(key_text([2, 9], packed=False))
+        self.assertEqual(p["features"], {"telemetry-opt-out", "feature-9"})
+        self.assertFalse(p["report_token"])
+        self.assertIsNone(license.key_payload("boxd-lic1_AAAA"))
+        self.assertIsNone(license.key_payload("not a key"))
+
+    def test_enabled_false_in_cluster_toml_is_refused(self):
+        cfg = self.cfg(with_telemetry(False), [1, 4])
+        self.assertEqual(telemetry.errors(cfg), [telemetry.BILLING_OFF])
+        with mock.patch.object(main.config, "load", return_value=cfg), \
+             self.assertRaises(InstallError) as e:
+            main.cmd_validate(mock.Mock(cluster="cluster.toml"))
+        self.assertIn("usage billing", str(e.exception))
+        # true, or unset, is fine; and without usage billing false is fine.
+        self.assertEqual(telemetry.errors(self.cfg(with_telemetry(True), [1, 4])), [])
+        self.assertEqual(telemetry.errors(self.cfg(with_telemetry(False), [1, 2])), [])
+
+    def test_a_customer_default_of_off_is_not_applied_and_warns(self):
+        self.write_defaults(False)
+        doc = aws_doc()
+        doc["license"] = {"key_file": "license.key"}
+        cfg = self.cfg(doc, [1, 4])
+        self.assertEqual(telemetry.setting(cfg), (None, None))
+        self.assertEqual(telemetry.errors(cfg), [])
+        (w,) = telemetry.warnings(cfg)
+        self.assertIn("usage billing", w)
+        # control's [telemetry] gets no default_enabled = false.
+        self.assertNotIn("default_enabled", telemetry.control_table(cfg))
+        # Without usage billing the default still applies.
+        cfg = self.cfg(doc, [1, 2])
+        self.assertEqual(telemetry.setting(cfg), (False, telemetry.CUSTOMER_DEFAULT))
+
+    def test_the_validate_line(self):
+        doc = aws_doc()
+        doc["license"] = {"key_file": "license.key"}
+        self.assertEqual(telemetry.validate_line(self.cfg(doc, [4])), telemetry.BILLING_LINE)
+        self.assertEqual(telemetry.validate_line(self.cfg(doc, [1])),
+                         telemetry.VALIDATE_LINE + " apply leaves the cluster's setting as it "
+                         "is ([telemetry] enabled is not set).")
+
+
 if __name__ == "__main__":
     unittest.main()
