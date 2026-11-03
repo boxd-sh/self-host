@@ -96,7 +96,7 @@ class Node:
         return self.roles[0]
 
 PROVIDER_TABLES = {"google", "github", "oidc", "resend", "analytics",
-                   "backups", "automations", "snapshot_archive"}
+                   "backups", "automations", "snapshot_archive", "storage_engine"}
 # [oidc] (boxd `OidcConfig`): single sign-on through the company's OpenID
 # Connect provider. Everything but the secret goes in cluster.toml; the
 # secret goes in the providers config, which validate never reads.
@@ -105,6 +105,59 @@ OIDC_KEYS = set(OIDC_REQUIRED) | {"ca_cert", "bootstrap_admin", "link_email_doma
 # The object-store fields [snapshot_archive] takes from terraform (AWS) or
 # the providers config; cluster.toml only names the folder.
 ARCHIVE_STORE_KEYS = ("endpoint", "bucket", "region", "access_key", "secret_key")
+
+# [storage_engine] (boxd's storage engine: machines' disks in an object store
+# bucket). cluster.toml holds the switches and the engine's settings; the
+# store (your own bucket, S3-compatible) goes in the providers config, as for
+# [snapshot_archive].
+STORAGE_DEFAULTS = ("bucket", "file")
+HIBERNATION_BLOBS = ("uploads", "auto", "off")
+STORAGE_SWITCH_KEYS = {"default_vm_storage": STORAGE_DEFAULTS, "hibernation_blobs": HIBERNATION_BLOBS}
+# worker.toml [storage_engine] ("engine") or [storage_engine.bucket] ("bucket"):
+# boxd's StorageEngineConfig / BucketEngineConfig, whose validate checks the
+# same ranges. Each: (table, check, what it must be).
+STORAGE_ENGINE_SETTINGS = {
+    "ram_cache_gib": ("engine", lambda v: _int(v) and v > 0, "a positive integer"),
+    "hibernated_ram_keep_hours": ("engine", lambda v: _num(v) and 0 <= v <= 8784,
+                                  "a number from 0 to 8784"),
+    "copy_mib_per_sec": ("engine", lambda v: _int(v) and 1 <= v <= 1048576,
+                         "an integer from 1 to 1048576"),
+    "cache_gib": ("bucket", lambda v: _int(v) and v > 0, "a positive integer"),
+    "freeze_interval_secs": ("bucket", lambda v: _int(v) and v > 0, "a positive integer"),
+}
+# The store: only in the providers config (it holds the bucket's key).
+STORAGE_STORE_KEYS = ("endpoint", "region", "bucket", "access_key", "secret_key",
+                      "conditional_put", "virtual_hosted_style")
+STORAGE_STORE_REQUIRED = ("region", "bucket", "access_key", "secret_key")
+CONDITIONAL_PUT = ("probe", "native", "head-then-put")
+# Set by the installer in worker.toml / bucket.toml, never by the operator.
+STORAGE_FORCED_KEYS = ("backends", "dir", "config", "prefix")
+
+def _int(v) -> bool:
+    """An integer, not a bool (bool is an int subclass: `cache_gib = true` is a typo)."""
+    return isinstance(v, int) and not isinstance(v, bool)
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+def storage_engine_on(doc: dict) -> bool:
+    """[storage_engine] is in cluster.toml (a table: validation refuses anything else)."""
+    return isinstance(doc.get("storage_engine"), dict)
+
+def auto_storage_bucket(doc: dict) -> bool:
+    """Terraform makes the cluster's bucket (AWS, GCP) unless the cloud table
+    says auto_storage_bucket = false (your own bucket, from `providers edit`).
+    Never on metal: there you bring the bucket."""
+    cloud = _cloud_name(doc)
+    if cloud == "metal" or not storage_engine_on(doc):
+        return False
+    return doc[cloud].get("auto_storage_bucket", True) is not False
+
+def storage_default(doc: dict) -> str:
+    """Where new machines go once the engine is on: [storage_engine]
+    default_vm_storage, "bucket" unless it says "file"."""
+    t = doc.get("storage_engine")
+    return t.get("default_vm_storage", "bucket") if isinstance(t, dict) else "file"
 
 def storage_bundle_warnings(cfg) -> list[str]:
     """What validate can tell without downloading the bundle: [storage_engine]
@@ -118,10 +171,9 @@ def storage_bundle_warnings(cfg) -> list[str]:
 
 def network_warnings(cfg) -> list[str]:
     """Routed mode is what live migration needs, and live migration moves
-    only machines on boxd's storage engine (`bucket`), which the installer
-    does not configure yet ([storage_engine])."""
+    only machines on boxd's storage engine (`bucket`): [storage_engine]."""
     if cfg.network_mode == "routed" and "storage_engine" not in cfg.doc:
-        return ['[network] mode = "routed" without the storage engine: machines keep their '
+        return ['[network] mode = "routed" without [storage_engine]: machines keep their '
                 "address when they move, but a live migration (`boxd-ctl vm migrate --live`) "
                 "takes only machines on the storage engine, which this cluster does not run"]
     return []
@@ -205,6 +257,8 @@ def validate_providers(doc: dict) -> None:
     for k in ("auth_configs", "webhook_secret", "connect_domain"):
         if k in doc.get("automations", {}):
             errs.append(f"[automations].{k} is derived by the installer — remove it")
+    if isinstance(doc.get("storage_engine"), dict):
+        errs += validate_storage_store(doc["storage_engine"])
     if errs:
         raise InstallError("providers config invalid:\n  " + "\n  ".join(errs))
 
@@ -287,12 +341,6 @@ def _validate(doc: dict) -> None:
         errs.append("[cluster].assets_version must be a 40-hex git sha (pinned) or a "
                     'channel name like "dev" or "storage/latest" (the latest bundle '
                     "published to it)")
-    if isinstance(se := doc.get("storage_engine"), dict) and se:
-        errs.append(f"[storage_engine] {', '.join(sorted(se))}: this installer turns the storage "
-                    "engine on with an empty [storage_engine] table only; its settings need a "
-                    "newer installer")
-    elif "storage_engine" in doc and not isinstance(se, dict):
-        errs.append("[storage_engine] must be a table")
     if "org_name" in doc["cluster"] and (why := org_name_error(doc["cluster"]["org_name"])):
         errs.append(f"[cluster].org_name {why}")
 
@@ -442,6 +490,7 @@ def _validate(doc: dict) -> None:
     mod.validate(doc, errs)
     _validate_templates(doc, errs)
     _validate_snapshot_archive(doc, errs)
+    _validate_storage_engine(doc, errs)
     _validate_oidc(doc, errs)
     _validate_license(doc, errs)
     _validate_telemetry(doc, errs)
@@ -693,6 +742,67 @@ def _validate_snapshot_archive(doc: dict, errs: list[str]) -> None:
                 or "" in parts or "." in parts or ".." in parts or parts[0] == "org"):
             errs.append(f"[snapshot_archive].archive_dir {d!r} must be a relative folder "
                         "without '..', not under org/ (DR backups live there)")
+
+def _validate_storage_engine(doc: dict, errs: list[str]) -> None:
+    """[storage_engine] turns boxd's storage engine on for every worker. In
+    cluster.toml: the two switches and the engine's settings. The store goes
+    in the providers config; what the installer sets itself is refused."""
+    cloud = _cloud_name(doc)
+    if cloud != "metal" and "auto_storage_bucket" in doc.get(cloud, {}) \
+            and not isinstance(doc[cloud]["auto_storage_bucket"], bool):
+        errs.append(f"[{cloud}].auto_storage_bucket must be true or false")
+    if "storage_engine" not in doc:
+        return
+    t = doc["storage_engine"]
+    if not isinstance(t, dict):
+        errs.append("[storage_engine] must be a table")
+        return
+    allowed = sorted(set(STORAGE_SWITCH_KEYS) | set(STORAGE_ENGINE_SETTINGS))
+    for k, v in t.items():
+        if k in STORAGE_SWITCH_KEYS:
+            if v not in STORAGE_SWITCH_KEYS[k]:
+                errs.append(f"[storage_engine].{k} must be one of "
+                            f"{', '.join(STORAGE_SWITCH_KEYS[k])}, got {v!r}")
+        elif k in STORAGE_ENGINE_SETTINGS:
+            _, ok, what = STORAGE_ENGINE_SETTINGS[k]
+            if not ok(v):
+                errs.append(f"[storage_engine].{k} must be {what}, got {v!r}")
+        elif k in STORAGE_FORCED_KEYS:
+            errs.append(f"[storage_engine].{k} is forced by the installer — remove it")
+        elif k in STORAGE_STORE_KEYS:
+            errs.append(f"[storage_engine].{k} doesn't belong in cluster.toml: the installer "
+                        "creates the bucket on AWS and GCP; for your own bucket set the store "
+                        "fields with `providers edit`")
+        else:
+            errs.append(f"[storage_engine].{k}: unknown key (allowed: {', '.join(allowed)})")
+    if storage_default(doc) == "bucket" and not _key_file_set(doc):
+        errs.append('[storage_engine] puts new machines in the bucket (default_vm_storage = '
+                    '"bucket"), which needs [license] key_file with a key that includes '
+                    'bucket-storage; or set default_vm_storage = "file"')
+
+def validate_storage_store(store: dict) -> list[str]:
+    """The providers config's [storage_engine]: an S3-compatible store (your
+    own bucket). Mapped to boxd's bucket file at render."""
+    errs = []
+    for k, v in store.items():
+        if k not in STORAGE_STORE_KEYS:
+            errs.append(f"[storage_engine].{k}: not a store key (allowed: "
+                        f"{', '.join(STORAGE_STORE_KEYS)}); the engine's settings go in "
+                        "cluster.toml's [storage_engine]")
+        elif k == "conditional_put":
+            if v not in CONDITIONAL_PUT:
+                errs.append(f"[storage_engine].conditional_put must be one of "
+                            f"{', '.join(CONDITIONAL_PUT)}, got {v!r}")
+        elif k == "virtual_hosted_style":
+            if not isinstance(v, bool):
+                errs.append("[storage_engine].virtual_hosted_style must be true or false")
+        elif not (isinstance(v, str) and v):
+            errs.append(f'[storage_engine].{k} must be a non-empty quoted string, e.g. {k} = "…"')
+    ep = store.get("endpoint")
+    if isinstance(ep, str) and ep and not ep.startswith(("https://", "http://")):
+        errs.append("[storage_engine].endpoint must start with https:// (or http:// for a "
+                    "local MinIO)")
+    return errs
 
 def _validate_templates(doc: dict, errs: list[str]) -> None:
     """Shape only. Whether each size fits the worker types is checked by

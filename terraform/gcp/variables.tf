@@ -39,6 +39,13 @@ variable "machine_type_defaults" {
   }
 }
 
+# [storage_engine] declared in cluster.toml (and [gcp] auto_storage_bucket
+# not false): storage_bucket.tf, and the worker instances get its service account.
+variable "enable_storage_bucket" {
+  type    = bool
+  default = false
+}
+
 variable "enable_backups" {
   type    = bool
   default = true

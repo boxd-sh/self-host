@@ -201,6 +201,36 @@ class State:
             with os.fdopen(fd, "w") as fh:
                 fh.write(value if value.endswith("\n") else value + "\n")
 
+    def storage_prefix(self) -> str:
+        """The storage engine's prefix in its bucket, engine/<nonce>: made once,
+        at the first render with [storage_engine], and kept until destroy
+        clears it (clear_storage_engine). A cluster rebuilt after destroy gets
+        a new one, so it never shares objects with the dead one, even in the
+        same bucket. Not the cluster id: that exists only after the converge."""
+        prefix = self.data.get("storage_prefix")
+        if not prefix:
+            prefix = f"engine/{pysecrets.token_hex(8)}"
+            self.data["storage_prefix"] = prefix
+            self.save()
+        return prefix
+
+    def storage_guard(self) -> dict | None:
+        """The one-way guard (written once the storage catalog is on): the
+        bundle, the bucket's identity and when the catalog went on. While it
+        is set, apply refuses to turn the engine off or move its bucket."""
+        return self.data.get("storage_engine")
+
+    def set_storage_guard(self, guard: dict) -> None:
+        self.data["storage_engine"] = guard
+        self.save()
+
+    def clear_storage_engine(self) -> None:
+        """destroy: the instances are gone, so the next apply is a new cluster
+        with a new prefix."""
+        self.data.pop("storage_engine", None)
+        self.data.pop("storage_prefix", None)
+        self.save()
+
     def deploy_pubkey(self) -> str:
         path = os.path.join(self.keys_dir, "boxd-deploy.pub")
         if not os.path.exists(path):

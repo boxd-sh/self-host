@@ -116,6 +116,13 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 # 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are
 # removed on the next apply), so list every size you want. Memory-heavy sizes
 # need memory-optimised workers (n2-highmem-*).
+# Bucket storage — machines' disks in an object store bucket, so they can move
+# between workers (docs/REFERENCE.md "Bucket storage"; needs a storage bundle,
+# assets_version = "storage/latest", and a license key with bucket-storage).
+# apply creates the bucket.
+# [storage_engine]
+# default_vm_storage = "bucket"        # default; "file" keeps new machines on disk
+
 # [templates]
 # sizes = [
 #     { vcpu = 1, memory_gb = 4 },

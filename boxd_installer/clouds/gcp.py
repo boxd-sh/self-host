@@ -18,6 +18,17 @@ DEFAULT_CA = "gts"
 TF_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "terraform", "gcp"))
 SSH_PATH = "IAP"
 SSH_HINT = "roles/iap.tunnelResourceAccessor"
+# Service account ids are 6-30 chars: <name>-backups and <name>-storage.
+SA_ID_MAX = 30
+# GCS bucket names: <project>-<name>-storage, at most 63 chars.
+BUCKET_NAME_MAX = 63
+
+def _auto_storage(doc: dict) -> bool:
+    """[storage_engine] declared makes terraform create the cluster's bucket,
+    a service account with access to it alone, and attach that account to the
+    worker instances (no key anywhere), unless [gcp] auto_storage_bucket = false."""
+    return isinstance(doc.get("storage_engine"), dict) and \
+        doc["gcp"].get("auto_storage_bucket", True) is not False
 
 def validate(doc: dict, errs: list[str]) -> None:
     # Private ingress is AWS-only; ignoring it here would expose a cluster
@@ -28,6 +39,18 @@ def validate(doc: dict, errs: list[str]) -> None:
     for k in ("bucket_access", "auto_snapshot_archive"):
         if k in doc["gcp"]:
             errs.append(f"[gcp].{k} is not supported (AWS-only)")
+    name = doc["cluster"]["name"]
+    accounts = [s for s, on in (("-backups", doc["gcp"].get("auto_backups", True)),
+                                ("-storage", _auto_storage(doc))) if on]
+    if accounts and len(name) + len("-backups") > SA_ID_MAX:
+        errs.append(f"[cluster].name must be <= {SA_ID_MAX - len('-backups')} chars on GCP: "
+                    f"the service accounts {' and '.join(f'<name>{s}' for s in accounts)} "
+                    f"are at most {SA_ID_MAX} chars")
+    if _auto_storage(doc):
+        bucket = f"{doc['gcp'].get('project', '')}-{name}-storage"
+        if len(bucket) > BUCKET_NAME_MAX:
+            errs.append(f"the storage bucket name {bucket} is {len(bucket)} chars, over GCS's "
+                        f"{BUCKET_NAME_MAX}: shorten [cluster].name")
 
 def tfvars(cfg, state, nodes: list[dict]) -> dict:
     return {
@@ -39,6 +62,7 @@ def tfvars(cfg, state, nodes: list[dict]) -> dict:
         "boot_image": _resolve_boot_image(cfg),
         "deploy_ssh_pubkey": state.deploy_pubkey(),
         "enable_backups": cfg.cloud.get("auto_backups", True),
+        "enable_storage_bucket": _auto_storage(cfg.doc),
         "nodes": nodes,
     }
 

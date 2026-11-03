@@ -13,7 +13,7 @@ locals {
 resource "google_project_service" "services" {
   for_each = toset([
     "compute.googleapis.com",
-    "iam.googleapis.com",      # backups service account
+    "iam.googleapis.com",      # backups and storage service accounts
     "iap.googleapis.com",      # ssh tunneling (the only ssh path)
     "publicca.googleapis.com", # ACME EAB minting for Google Trust Services
     "storage.googleapis.com"   # backups bucket + HMAC key
@@ -154,6 +154,18 @@ resource "google_compute_instance" "node" {
   }
 
   can_ip_forward = true
+
+  # The storage engine's account, on workers only: their bucket.toml names no
+  # key, so boxd reaches the bucket through the metadata server as this
+  # account (guests can't: the worker drops their traffic to 169.254.169.254).
+  # Attaching it stops a running worker once (allow_stopping_for_update).
+  dynamic "service_account" {
+    for_each = var.enable_storage_bucket && contains(each.value.roles, "worker") ? [1] : []
+    content {
+      email  = google_service_account.storage[0].email
+      scopes = ["cloud-platform"]
+    }
+  }
 
   metadata = {
     ssh-keys       = "ubuntu:${var.deploy_ssh_pubkey}"

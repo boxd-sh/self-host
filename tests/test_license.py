@@ -461,7 +461,7 @@ class ApplyOrder(LicenseCluster):
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
         with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
-                                 render=mock.DEFAULT), \
+                                 render=mock.DEFAULT, storage_engine=mock.DEFAULT), \
              mock.patch.multiple(main.tf, init=calls.tf_init, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=calls.write_tfvars,

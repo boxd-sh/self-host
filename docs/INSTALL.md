@@ -525,7 +525,9 @@ old Elastic IP need their records updated by their owners.
 ### Buckets only inside the VPC
 
 The buckets `apply` creates (backups, and the
-[snapshot archive](REFERENCE.md#snapshot-archive) when you turn it on) are private
+[snapshot archive](REFERENCE.md#snapshot-archive) and the
+[storage engine's](REFERENCE.md#bucket-storage-storage_engine) bucket when you turn
+them on) are private
 either way: only the IAM users `apply` creates can use them. To also refuse
 any request that doesn't come from inside the cluster's VPC, even one with
 valid keys, set:

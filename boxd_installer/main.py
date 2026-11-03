@@ -8,7 +8,7 @@ import shutil as _shutil
 import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
-               oidc, remote_state, render, telemetry, tf)
+               oidc, remote_state, render, storage_engine, telemetry, tf)
 from .state import State, generate_egress_ca
 from .util import InstallError, log
 
@@ -86,6 +86,9 @@ def _apply(cfg, args) -> int:
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     check_storage_bundle(cfg, assets_root)
+    # Before terraform: once the storage catalog is on, the engine and its
+    # bucket are one-way (storage_engine.check_guard).
+    storage = storage_engine.check_guard(cfg, state, assets_root)
     assets.console_tarball(assets_root)
 
     # metal: the hosts exist, so there is nothing to plan or replace.
@@ -113,12 +116,14 @@ def _apply(cfg, args) -> int:
         log(f"warning: {warning}")
     composio.sync_auth_configs(cfg, state, assets_root)
     ensure_egress_ca(cfg, state)
+    storage_engine.adopt_prefix(cfg, state)
     alloc = state.allocate(cfg)
     r = render.Renderer(cfg, alloc, tf_out, state, assets_root=assets_root)
     _write_out(r.render_all(), args.out_dir)
 
     ansible.preflight(cfg)
     check_network_mode(cfg, state)
+    storage_engine.check_identity(cfg, storage, r)
     if not clouds.provisions(cfg):
         for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
             log(f"warning: {warning}")
@@ -144,6 +149,8 @@ def _apply(cfg, args) -> int:
     if restarted:
         log("after the restart, every node registered")
     control_carry.clear(state)
+    # Before any switch: a worker that can't open its bucket fails the apply.
+    storage_engine.wait_bucket_open(cfg)
 
     # Every node (control, proxy, console) runs the new bundle now, so the
     # cluster ID can be made (once; a no-op after). Before the key: a bound
@@ -152,6 +159,11 @@ def _apply(cfg, args) -> int:
     # Before the templates, so the key is in place before any machine is made.
     if key:
         ansible.install_license(cfg, key)
+    # After the key: a bucket default needs its bucket-storage feature. The
+    # guard is pushed to the state bucket the moment the catalog is on.
+    storage_engine.set_switches(
+        cfg, state, storage, r,
+        push=lambda: remote_state.push(cfg, args.state_dir, delete_local=False))
     value, source = telemetry.setting(cfg)
     if value is None:
         log("telemetry: [telemetry] enabled is not set; the cluster's setting is left as it is")
@@ -159,7 +171,8 @@ def _apply(cfg, args) -> int:
         ansible.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
 
     image, tag = assets.computer_image(assets_root)
-    ansible.seed_templates(cfg, image, tag, cfg.assets_version)
+    ansible.seed_templates(cfg, image, tag, cfg.assets_version,
+                           storage=storage_engine.template_storage(cfg))
     ansible.configure_orgs(cfg, cfg.machine_sizes())
 
     # The exact bundle this cluster now runs — with a channel, the only
@@ -194,8 +207,6 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
             "file-only one (its manifest lists no \"bucket\" feature). Set "
             '[cluster].assets_version = "storage/latest" (or a storage bundle\'s id), or remove '
             "[storage_engine]")
-    raise InstallError("[storage_engine]: this installer checks for a storage bundle but doesn't "
-                       "configure the storage engine yet; that needs a newer installer")
 
 def check_network_mode(cfg, state) -> None:
     """Refuse to switch an existing cluster's [network] mode (bridge <->
@@ -255,12 +266,40 @@ def cmd_destroy(args) -> int:
             # No license check: destroying never depends on the key file.
             tfvars = tf.write_tfvars(cfg, state, args.out_dir, tf.instance_types(cfg),
                                      for_destroy=True)
-        tf.destroy(cfg, tfvars)
+        try:
+            tf.destroy(cfg, tfvars)
+        except InstallError:
+            kept = storage_engine.kept_buckets(tf.state_list(cfg))
+            if kept is None:
+                raise
+            log(kept_buckets_message(state, kept))
         control_carry.clear(state)
+        # The instances are gone: the next apply is a new cluster, with a new
+        # storage prefix and no guard.
+        state.clear_storage_engine()
     print("infra destroyed. Encrypted state (ids, keys) kept in the state "
           "bucket — delete the installer-state.enc object only if this "
           "cluster is gone for good.")
     return 0
+
+def kept_buckets_message(state, kept: list[str]) -> str:
+    """A destroy that failed only on buckets with objects in them
+    (force_destroy is false on the storage, backups and archive buckets): the
+    rest is gone. They stay in terraform state, so an apply under the same
+    cluster name keeps using them; deleting them is the operator's call."""
+    try:
+        outputs = tf.cached_outputs(state)
+    except InstallError:
+        outputs = {}
+    names = []
+    for addr in kept:
+        res = addr.split(".")[1].split("[")[0]
+        out = {"storage": "storage_bucket"}.get(res, res)
+        bucket = (outputs.get(out) or {}).get("bucket")
+        names.append(f"{bucket} ({addr})" if bucket else addr)
+    return ("kept " + ", ".join(names) + ": not empty, and terraform never deletes a bucket "
+            "with objects in it. An apply of this cluster keeps using it; delete it by hand "
+            "only if this cluster is gone for good")
 
 PROVIDERS_TEMPLATE = """\
 # Secret provider tables — encrypted at rest in the state bucket, merged over cluster.toml
@@ -332,6 +371,20 @@ PROVIDERS_TEMPLATE = """\
 # region = ""
 # access_key = ""
 # secret_key = ""
+
+# The storage engine's bucket (machines' disks). Turned on by [storage_engine]
+# in cluster.toml; on AWS and GCP the installer creates the bucket. Set these
+# only for YOUR OWN S3-compatible bucket: on [metal], or with [aws]/[gcp]
+# auto_storage_bucket = false (refused while the installer makes the bucket).
+# The bucket needs a lifecycle rule that aborts incomplete multipart uploads.
+# conditional_put: leave it out (probe) so apply can test the bucket opens.
+# [storage_engine]
+# endpoint = "https://s3.<region>.amazonaws.com"
+# region = ""
+# bucket = ""
+# access_key = ""
+# secret_key = ""
+# virtual_hosted_style = false
 
 # Composio integrations. auth_configs/webhook_secret/connect_domain are
 # derived by the installer — only the keys below belong here.

@@ -750,9 +750,7 @@ source ~/.boxd-<cluster>.env
 A storage bundle is what `[storage_engine]` needs. `apply` refuses
 `[storage_engine]` with a standard bundle (the bundle's manifest lists no
 `bucket` feature), and `validate` warns when `[storage_engine]` comes with a
-channel other than `storage/*`. This release only reserves the table: an empty
-`[storage_engine]` passes validation, and `apply` stops after the bundle check
-because configuring the engine needs a newer installer.
+channel other than `storage/*`. See [Bucket storage](#bucket-storage-storage_engine).
 
 Every `apply` prints the version it installed (`Assets: <sha> (channel latest)`)
 and records it in the installer state. Note it down: it's the exact value to
@@ -1120,6 +1118,89 @@ Removing `[snapshot_archive]` turns the archive off. On AWS the next
 it, because archived snapshots exist only there. Unarchive them, or empty
 the bucket, first.
 
+### Bucket storage (`[storage_engine]`)
+
+boxd's storage engine keeps machines' disks in an object store bucket instead
+of on one worker's disk, so any worker can open them. A machine then moves
+between workers (live migration with `[network] mode = "routed"`, relocated
+wakes), and a hibernated one's memory waits in the bucket. It is a licensed
+feature: the license key needs `bucket-storage`, and the cluster runs a storage
+bundle (`assets_version = "storage/latest"`, or a storage bundle's id).
+
+```toml
+[storage_engine]                       # every worker runs the engine
+# default_vm_storage = "bucket"        # new machines: "bucket" (default) or "file"
+# hibernation_blobs = "uploads"        # "uploads" (default), "auto" or "off"
+# ram_cache_gib = 32                   # boxd's defaults otherwise
+# hibernated_ram_keep_hours = 24
+# copy_mib_per_sec = 256
+# cache_gib = 100
+# freeze_interval_secs = 600
+```
+
+`default_vm_storage = "bucket"` needs `[license] key_file`. `backends`, `dir`,
+`config` and `prefix` are the installer's to set, and the store's fields
+belong in the providers config (below).
+
+**What `apply` does.**
+1. Before terraform: refuses a bundle without the engine (its manifest lists
+   no `bucket` feature), and checks the one-way rules below.
+2. Terraform makes the cluster's bucket:
+   - AWS: `<cluster>-storage-<account>-<region>`, with an IAM user and access
+     key that open only that bucket, SSE-S3, a lifecycle rule that aborts
+     incomplete multipart uploads after a day, and no public access. With
+     [`bucket_access = "vpc"`](INSTALL.md#buckets-only-inside-the-vpc) it is
+     VPC-only too.
+   - GCP: `<project>-<cluster>-storage`, with public access prevention, the
+     same lifecycle rule, and a service account `<cluster>-storage` that may
+     use only that bucket. The account is attached to the worker instances,
+     so no key exists anywhere. Attaching it stops each running worker once:
+     turning the engine on for an existing GCP cluster restarts its workers.
+3. Every worker gets `[storage_engine]` in `worker.toml` and the bucket's
+   details in `/etc/boxd/bucket.toml` (mode 0600, owned by `boxd`); control,
+   proxy and console nodes get neither. Each cluster's objects live under its
+   own prefix, `engine/<random>`, made once and kept in installer state.
+4. After the workers start, each must log that it opened its bucket (opening
+   writes a test object), or `apply` stops with the worker's error.
+5. Then the cluster switches, each read first and set only when it differs:
+   the storage catalog on, hibernation blobs, and the default for new machines.
+   A license without `bucket-storage` stops the first `apply` that sets the
+   default to `bucket`.
+6. Templates: with the `bucket` default, `apply` builds bucket templates
+   (`computer-bucket-<size>-…`), each built once and shared by every worker
+   (`[worker] templates = "both"` unless you set it), and removes the file ones.
+
+**Your own bucket** (bare metal always, or `[aws]`/`[gcp]`
+`auto_storage_bucket = false`): put an S3-compatible store in a
+`[storage_engine]` table with `./boxd-install providers edit`: `endpoint`,
+`region`, `bucket`, `access_key`, `secret_key`, and optionally
+`virtual_hosted_style`. Give the bucket a lifecycle rule that aborts incomplete
+multipart uploads. Leave `conditional_put` out unless your store needs it:
+with `native` or `head-then-put`, opening the bucket writes nothing, so `apply`
+can't tell a wrong key. A providers store is refused while `apply` makes the
+bucket itself. Decide which bucket before the first `apply` with the engine.
+
+**One way.** Once the storage catalog is on, machines can live in the
+bucket. From then on `apply` refuses:
+- removing `[storage_engine]`;
+- a bundle without the engine (a standard bundle, or a pinned `latest`);
+- changing `auto_storage_bucket`, or your own bucket's `bucket` or `endpoint`;
+- anything that would give the workers another bucket or prefix than the one
+  they run on (checked against each worker's deployed `bucket.toml` too, so a
+  cluster turned on by hand keeps its bucket and prefix).
+
+There is no override: moving a cluster to another bucket is a support
+procedure. Before the catalog was ever on, removing `[storage_engine]` is
+allowed and the workers' bucket file is deleted. `apply` never turns the
+catalog off; if someone did (before rolling a node back), `apply` stops until
+it is on again (`boxd-ctl cluster set-storage-catalog on`).
+
+**When the license lapses**, `apply` warns: the default stays `bucket` but new
+machines are born on file, and machines already in the bucket keep working.
+
+Existing machines stay on file storage when the engine is turned on; moving
+them is in [OPERATIONS.md](../OPERATIONS.md#bucket-storage).
+
 ### State and recovery
 
 ```sh
@@ -1168,12 +1249,15 @@ names, certificates, secrets and provider settings. The cluster's data does
 not come back: users, orgs and machines live on the control nodes, so the
 rebuilt cluster starts empty, with a **new cluster ID**. A license key bound
 to the old ID is refused there (`apply` stops after the nodes are up); ask
-boxd for a new key. An unbound key keeps working. If VM backups
-were ever taken, `destroy` stops at the backups bucket, because it won't
-delete one that isn't empty. Empty it first if you don't need the backups:
-`<project>-backups` on GCP, `<cluster>-backups-<account>-<region>` on AWS.
-The same goes for the [snapshot archive](#snapshot-archive) bucket,
-`<cluster>-archive-<account>-<region>`.
+boxd for a new key. An unbound key keeps working. Buckets with objects in
+them are never deleted: the backups bucket (`<project>-backups` on GCP,
+`<cluster>-backups-<account>-<region>` on AWS), the
+[snapshot archive](#snapshot-archive) bucket, and the
+[storage engine's](#bucket-storage-storage_engine) (`<cluster>-storage-…` on AWS,
+`<project>-<cluster>-storage` on GCP). `destroy` removes everything else, names
+each bucket it kept, and goes on. A later `apply` of the same cluster uses them
+again; the storage engine starts under a new prefix there. Delete them by
+hand only if the cluster is gone for good.
 
 When the cluster is gone for good, also:
 

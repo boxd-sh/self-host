@@ -179,7 +179,8 @@ class ApplyPassesTheSetting(Isolated):
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
         with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
-                                 render=mock.DEFAULT, license=mock.DEFAULT), \
+                                 render=mock.DEFAULT, license=mock.DEFAULT,
+                                 storage_engine=mock.DEFAULT), \
              mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,
@@ -212,7 +213,7 @@ class ApplyPassesTheSetting(Isolated):
         with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
                                  render=mock.DEFAULT, license=mock.DEFAULT,
-                                 _write_out=calls.write_out), \
+                                 storage_engine=mock.DEFAULT, _write_out=calls.write_out), \
              mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,

@@ -58,14 +58,15 @@ class Validation(unittest.TestCase):
     def with_engine(self, table, version="storage/latest") -> dict:
         d = doc(version)
         d["storage_engine"] = table
+        d["license"] = {"key_file": "license.key"}
         return d
 
-    def test_an_empty_table_is_accepted(self):
+    def test_an_empty_table_with_a_license_is_accepted(self):
         config._validate(self.with_engine({}))
 
-    def test_settings_need_a_newer_installer(self):
-        with self.assertRaisesRegex(InstallError, r"\[storage_engine\] cache_gib: .*newer installer"):
-            config._validate(self.with_engine({"cache_gib": 10}))
+    def test_settings_are_accepted_now(self):
+        # The installer configures the engine (tests/test_storage_engine.py has the rest).
+        config._validate(self.with_engine({"cache_gib": 10}))
 
     def test_it_must_be_a_table(self):
         with self.assertRaisesRegex(InstallError, r"\[storage_engine\] must be a table"):
@@ -94,9 +95,8 @@ class FailClosed(unittest.TestCase):
             with self.assertRaisesRegex(InstallError, 'file-only one.*"storage/latest"'):
                 main.check_storage_bundle(self.cfg(True), unpacked(manifest))
 
-    def test_a_storage_bundle_passes_the_check_but_needs_a_newer_installer(self):
-        with self.assertRaisesRegex(InstallError, "doesn't configure the storage engine yet"):
-            main.check_storage_bundle(self.cfg(True), unpacked({"git_sha": SHA, "features": ["bucket"]}))
+    def test_a_storage_bundle_passes(self):
+        main.check_storage_bundle(self.cfg(True), unpacked({"git_sha": SHA, "features": ["bucket"]}))
 
 if __name__ == "__main__":
     unittest.main()
