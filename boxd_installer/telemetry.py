@@ -16,9 +16,17 @@ A copy of the installer that boxd made for one customer may hold a
 customer_defaults.toml next to this file, with [telemetry] enabled = false;
 it is used when cluster.toml sets none. Without that file there is no
 default. An explicit cluster.toml value wins.
+
+A license key with usage billing bills the cluster from its telemetry
+reports, every 5 minutes, so telemetry can't be turned off with it:
+`enabled = false` in cluster.toml is an error, and a customer default of off
+is ignored with a warning (control would refuse `off` anyway: such a key
+never includes telemetry opt-out).
 """
 import os
 import tomllib
+
+from . import license
 
 CUSTOMER_DEFAULTS = os.path.join(os.path.dirname(__file__), "customer_defaults.toml")
 
@@ -27,6 +35,12 @@ CUSTOMER_DEFAULT = "customer default"
 
 VALIDATE_LINE = ("This cluster sends an hourly usage report to boxd (no personal data). "
                  "See it with `boxd-ctl telemetry show`.")
+BILLING_LINE = ("This cluster's license key has usage billing: the cluster sends boxd a signed "
+                "usage report every 5 minutes (no personal data), and telemetry stays on. See "
+                "it with `boxd-ctl telemetry show`.")
+BILLING_OFF = ("[telemetry] enabled = false: this cluster's license key has usage billing, "
+               "which bills the cluster from its telemetry reports, so telemetry can't be "
+               "turned off. Remove enabled = false")
 
 
 def customer_default(path: str | None = None) -> bool | None:
@@ -48,11 +62,25 @@ def setting(cfg, defaults: str | None = None) -> tuple[bool | None, str | None]:
         return t["enabled"], CLUSTER_TOML
     d = customer_default(defaults)
     if d is not None:
+        # A usage-billed cluster keeps sending: its default of off is not
+        # applied (warnings() says so).
+        if d is False and license.usage_billing(cfg):
+            return None, None
         return d, CUSTOMER_DEFAULT
     return None, None
 
 
+def errors(cfg) -> list[str]:
+    """What stops `validate` and `apply`: enabled = false in cluster.toml with
+    a usage-billing key."""
+    if cfg.doc.get("telemetry", {}).get("enabled") is False and license.usage_billing(cfg):
+        return [BILLING_OFF]
+    return []
+
+
 def validate_line(cfg, defaults: str | None = None) -> str:
+    if license.usage_billing(cfg):
+        return BILLING_LINE
     value, source = setting(cfg, defaults)
     if value is False:
         where = "[telemetry] enabled = false" if source == CLUSTER_TOML else \
@@ -68,6 +96,11 @@ def validate_line(cfg, defaults: str | None = None) -> str:
 def warnings(cfg, defaults: str | None = None) -> list[str]:
     """`validate`'s warnings: the customer default turns telemetry off, but
     there is no license key to allow it (apply warns and goes on)."""
+    if customer_default(defaults) is False and "enabled" not in cfg.doc.get("telemetry", {}) \
+            and license.usage_billing(cfg):
+        return ["this installer's default turns telemetry off, but the license key has usage "
+                "billing: telemetry stays on (the cluster is billed from its reports), and "
+                "apply does not run `telemetry off`."]
     value, source = setting(cfg, defaults)
     lic = cfg.doc.get("license")
     if value is False and source == CUSTOMER_DEFAULT and \
