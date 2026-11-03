@@ -121,8 +121,8 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 #   archive_dir = "snapshot-archive"     # optional
 #
 # Bucket storage — machines' disks in an object store bucket, so they can move
-# between workers (README "Bucket storage"; needs a storage bundle,
-# assets_version = "storage/latest", and a license key with bucket-storage).
+# between workers (README "Bucket storage"; needs a license key
+# with bucket-storage).
 # apply creates the bucket:
 #   [storage_engine]
 #   default_vm_storage = "bucket"        # default; "file" keeps new machines on disk

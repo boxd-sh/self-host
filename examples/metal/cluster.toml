@@ -108,8 +108,8 @@ data_disk   = "/dev/nvme1n1"             # CHANGE
 # 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are
 # removed on the next apply), so list every size you want.
 # Bucket storage — machines' disks in an object store bucket, so they can move
-# between workers (docs/REFERENCE.md "Bucket storage"; needs a storage bundle,
-# assets_version = "storage/latest", and a license key with bucket-storage).
+# between workers (docs/REFERENCE.md "Bucket storage"; needs a license key
+# with bucket-storage).
 # On bare metal, bring the bucket: its store goes in the providers config
 # (`providers edit`, [storage_engine] endpoint, region, bucket, access_key,
 # secret_key).

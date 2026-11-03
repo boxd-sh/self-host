@@ -85,6 +85,17 @@ def key_path(cfg) -> str | None:
     return path
 
 
+def key_text(cfg) -> str:
+    """The configured license key, one line (key_path checks the file). The
+    releases boxd publishes for it are under a path made from it
+    (assets.base_url)."""
+    path = key_path(cfg)
+    if path is None:
+        raise InstallError("no [license] key_file")
+    with open(path, errors="replace") as fh:
+        return next(line.strip() for line in fh.read().splitlines() if line.strip())
+
+
 # The features a key can carry, by their number in the key. The numbers are
 # fixed by boxd's license format and never reused.
 FEATURE_NAMES = {

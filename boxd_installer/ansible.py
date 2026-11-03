@@ -75,7 +75,7 @@ def converge(cfg, out_dir: str, assets_root: str, host_kernel_release: str = "",
     node_vars = os.path.abspath(os.path.join(out_dir, "node-assets.json"))
     fd = os.open(node_vars, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
-        json.dump(node_assets_vars(cfg.assets_version, assets_root), fh)
+        json.dump(node_assets_vars(cfg, assets_root), fh)
     run(["ansible-playbook", "-i", inv, "site.yml",
          "-e", f"@{node_vars}",
          "-e", f"boxd_assets_dir={os.path.abspath(assets_root)}",
@@ -86,7 +86,7 @@ def converge(cfg, out_dir: str, assets_root: str, host_kernel_release: str = "",
          "-e", f"boxd_downloads_local_dir={os.path.abspath(os.path.join(out_dir, 'downloads'))}"],
         cwd=ANSIBLE_DIR)
 
-def node_assets_vars(sha: str, assets_root: str) -> dict:
+def node_assets_vars(cfg, assets_root: str) -> dict:
     """Extra vars for boxd-common's fetch-assets: each node downloads the
     bundle from boxd's bucket itself and checks it against these hashes,
     from the manifest assets.ensure verified here. Pushed through the ssh
@@ -94,8 +94,9 @@ def node_assets_vars(sha: str, assets_root: str) -> dict:
     the 82 MB host kernel alone, against ~3s fetched by the node."""
     with open(os.path.join(assets_root, "MANIFEST.json")) as fh:
         files = json.load(fh)["files"]
+    sha = cfg.assets_version
     return {"boxd_assets_sha": sha,
-            "boxd_assets_url": assets.zip_url(sha),
+            "boxd_assets_url": assets.zip_url(cfg, sha),
             "boxd_asset_hashes": {rel: h for rel, h in files.items()
                                   if rel.startswith(NODE_ASSET_DIRS)}}
 

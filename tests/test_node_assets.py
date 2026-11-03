@@ -11,7 +11,7 @@ import unittest
 import zipfile
 from unittest import mock
 
-from boxd_installer import ansible
+from boxd_installer import ansible, config
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 UNPACK = os.path.join(ROOT, "ansible", "roles", "boxd-common", "files", "boxd-assets-unpack.py")
@@ -24,8 +24,9 @@ class NodeAssetsVars(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, "MANIFEST.json"), "w") as fh:
                 json.dump({"files": files}, fh)
+            cfg = mock.Mock(spec=config.Config, assets_version=SHA)
             with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": "0" * 64}):
-                got = ansible.node_assets_vars(SHA, root)
+                got = ansible.node_assets_vars(cfg, root)
         self.assertEqual(got["boxd_assets_sha"], SHA)
         self.assertTrue(got["boxd_assets_url"].endswith(f"/{'0' * 64}/boxd-assets-{SHA}.zip"))
         self.assertEqual(got["boxd_asset_hashes"],

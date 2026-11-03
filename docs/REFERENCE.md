@@ -152,6 +152,13 @@ key_file = "license.key"
 `license.key` is git-ignored. **If you use another file name, add it to
 `.gitignore` yourself**: the key must not be committed.
 
+With a key, the installer downloads the releases boxd publishes for that key:
+they are under a path made from the key, and only the key finds them. Keep
+it as private as the state key. When the key changes (a renewal, or a key
+with more features), boxd publishes your releases for the new key: replace
+the file and apply. Without a key, the installer downloads from boxd's
+release bucket.
+
 Every `apply` installs it with `boxd-ctl license install` on a control node.
 Before that, once every node runs the new bundle, it makes the cluster's ID
 with `boxd-ctl license init-cluster-id` (a no-op when the ID exists); a key
@@ -781,15 +788,12 @@ source ~/.boxd-<cluster>.env
 - **A 40-character version id** (a git sha): the cluster stays on exactly
   that release until you change it. Use this if every upgrade must be a
   planned change.
-- **`"storage/latest"`**: the newest storage bundle. boxd builds each release
-  twice: the standard bundle, and a storage bundle whose workers also run the
-  storage engine (machines' disks in an object store bucket, a licensed
-  feature). A storage bundle has a version id of its own, not the commit's.
 
-A storage bundle is what `[storage_engine]` needs. `apply` refuses
-`[storage_engine]` with a standard bundle (the bundle's manifest lists no
-`bucket` feature), and `validate` warns when `[storage_engine]` comes with a
-channel other than `storage/*`. See [Bucket storage](#bucket-storage-storage_engine).
+With a license key, `latest` is the newest release boxd has published for
+that key, and the releases match what the key includes: with
+[bucket storage](#bucket-storage-storage_engine), `latest` is a release with
+it. `apply` refuses `[storage_engine]` with a release without it (the
+release's manifest lists no `bucket` feature).
 
 Every `apply` prints the version it installed (`Assets: <sha> (channel latest)`)
 and records it in the installer state. Note it down: it's the exact value to
@@ -1163,8 +1167,8 @@ boxd's storage engine keeps machines' disks in an object store bucket instead
 of on one worker's disk, so any worker can open them. A machine then moves
 between workers (live migration with `[network] mode = "routed"`, relocated
 wakes), and a hibernated one's memory waits in the bucket. It is a licensed
-feature: the license key needs `bucket-storage`, and the cluster runs a storage
-bundle (`assets_version = "storage/latest"`, or a storage bundle's id).
+feature: the license key needs `bucket-storage`, and the cluster runs a release
+with bucket storage (with such a key, `latest` is one).
 
 ```toml
 [storage_engine]                       # every worker runs the engine
@@ -1360,6 +1364,10 @@ When the cluster is gone for good, also:
   boxd hasn't published (a typo in a pinned sha, or a channel name boxd
   doesn't publish). `download failed (403)` means the release bucket refused the
   download; if it persists, tell boxd.
+- **`boxd has published no such release for this license key`**: either
+  `license.key` doesn't hold the key boxd sent you (an old key after a
+  renewal, or a copy from another cluster), or `assets_version` names a
+  version boxd hasn't published for it. If both are right, tell boxd.
 - **`assets download failed (403/404)`**, on a
   [cluster from before the release bucket](#clusters-installed-before-the-release-bucket):
   `BOXD_PRODUCT_LICENSE` is wrong or not set in this shell

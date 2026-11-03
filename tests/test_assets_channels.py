@@ -30,16 +30,18 @@ class Response(io.BytesIO):
 
 class Validation(unittest.TestCase):
     def test_sha_and_channel_names_are_valid(self):
-        for v in (SHA, "dev", "staging", "rc-2", "storage/latest", "storage/beta", "dev/latest"):
+        for v in (SHA, "latest", "dev", "staging", "rc-2"):
             config._validate(doc(v))
 
     def test_anything_else_is_refused(self):
-        for v in ("Dev", "", "957e5c5a", "-dev", 3, "a/b/c", "/x", "x/", "Storage/x", "storage/"):
-            with self.assertRaisesRegex(InstallError, "40-hex git sha .pinned. or a channel"):
+        for v in ("Dev", "", "957e5c5a", "-dev", 3, "a/b/c", "/x", "x/", "storage/latest",
+                  "storage/"):
+            with self.assertRaisesRegex(InstallError, 'a channel name such as "latest"'):
                 config._validate(doc(v))
 
 class Resolve(unittest.TestCase):
     def resolve(self, version, urlopen):
+        # The old path downloads with BOXD_PRODUCT_LICENSE, not a key file.
         cfg = config.Config(doc(version))
         with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": LICENSE}), \
                 mock.patch.object(assets.urllib.request, "urlopen", urlopen), \

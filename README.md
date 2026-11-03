@@ -51,8 +51,10 @@ Every install is driven by `cluster.toml`. Its state, including TLS keys, node
 identities and provider secrets, is encrypted in a bucket you own (on bare
 metal, a file next to `cluster.toml`), under a key that only you hold.
 Binaries, the console, the CLI, the host kernel and the VM image come in a
-release bundle that boxd signs. The installer checks that
-signature against [`release-keys/`](release-keys) before it unpacks anything.
+release bundle that boxd signs. With a [license key](docs/REFERENCE.md#license-key),
+the installer downloads the releases boxd publishes for that key. It checks
+the signature against [`release-keys/`](release-keys) before it unpacks
+anything.
 
 ## What you get
 

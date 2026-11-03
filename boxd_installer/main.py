@@ -44,7 +44,7 @@ def cmd_validate(args) -> int:
     if errs := telemetry.errors(cfg):
         raise InstallError("; ".join(errs))
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
-                + config.network_warnings(cfg) + config.storage_bundle_warnings(cfg))
+                + config.network_warnings(cfg))
     for warning in warnings:
         log(f"warning: {warning}")
     print("cluster.toml OK")
@@ -207,9 +207,9 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
         return
     if "bucket" not in assets.features(assets_root):
         raise InstallError(
-            f"[storage_engine] needs a storage bundle, and {cfg.assets_version[:12]} is a "
-            "file-only one (its manifest lists no \"bucket\" feature). Set "
-            '[cluster].assets_version = "storage/latest" (or a storage bundle\'s id), or remove '
+            f"[storage_engine] needs a release with bucket storage, and {cfg.assets_version[:12]} "
+            "is one without it (its manifest lists no \"bucket\" feature). Bucket storage "
+            "comes with a license key that includes it: ask your boxd contact, or remove "
             "[storage_engine]")
 
 def check_network_mode(cfg, state) -> None:
