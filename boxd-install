@@ -10,7 +10,7 @@
 # Your gcloud and aws logins live in ~/.config/gcloud and ~/.aws (shared with
 # any host install); gcloud's ssh key in ~/.config/boxd-install/ssh. BOXD_STATE_KEY, BOXD_PRODUCT_LICENSE and AWS_* pass
 # through from your environment by name; their values never reach a command
-# line. So does BOXD_RELEASES_URL (a copy of boxd's release bucket, for
+# line. So does BOXD_RELEASES_URL (a copy of boxd's releases, for
 # tests); a file:// one is mounted read-only at the same path. The image is ghcr.io/boxd-sh/self-host-tools:<docker/VERSION>;
 # if it can't be pulled it is built locally from docker/Dockerfile.
 # BOXD_INSTALLER_IMAGE overrides it.

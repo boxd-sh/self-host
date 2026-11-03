@@ -51,8 +51,9 @@ Every install is driven by `cluster.toml`. Its state, including TLS keys, node
 identities and provider secrets, is encrypted in a bucket you own (on bare
 metal, a file next to `cluster.toml`), under a key that only you hold.
 Binaries, the console, the CLI, the host kernel and the VM image come in a
-release bundle that boxd signs. The installer checks that
-signature against [`release-keys/`](release-keys) before it unpacks anything.
+release bundle that boxd signs, and the installer downloads it with your
+[license key](docs/REFERENCE.md#license-key). It checks the signature against
+[`release-keys/`](release-keys) before it unpacks anything.
 
 ## What you get
 
@@ -94,7 +95,10 @@ bucket: follow [Install on bare metal](docs/INSTALL.md#install-on-bare-metal).
    you hold it. See [Your state key](docs/INSTALL.md#your-state-key).
 3. **Create the state bucket.** See [GCP](docs/INSTALL.md#4-state-bucket) or
    [AWS](docs/INSTALL.md#4-state-bucket-1).
-4. **Fill in `cluster.toml` and apply.** These commands are the same on
+4. **Save your license key** from boxd in `license.key`, next to
+   `cluster.toml`. The installer downloads boxd's releases with it, and the
+   file is git-ignored. See [License key](docs/REFERENCE.md#license-key).
+5. **Fill in `cluster.toml` and apply.** These commands are the same on
    either cloud:
 
 ```sh
@@ -118,12 +122,13 @@ the cluster's org. The steps are in
 
 ## When 16 vCPUs is not enough
 
-Without a license key, a cluster runs on the **free tier**: its worker hosts
-can have up to 16 vCPUs in all. That counts the logical CPUs of the worker
-hosts, not the vCPUs the VMs get. A cluster over the limit keeps running and
-keeps its machines, but refuses new ones. A [license key](docs/REFERENCE.md#license-key)
-from [boxd](https://boxd.sh) lifts the limit. You can add a key at any time:
-put it in a file next to `cluster.toml` and run `apply` again.
+A [license key](docs/REFERENCE.md#license-key) without unlimited worker vCPUs
+is the **free tier**: the cluster's worker hosts can have up to 16 vCPUs in
+all. That counts the logical CPUs of the worker hosts, not the vCPUs the VMs
+get. A cluster over the limit keeps running and keeps its machines, but
+refuses new ones. A key with unlimited worker vCPUs from
+[boxd](https://boxd.sh) lifts the limit. You can change keys at any time: put
+the new key in `license.key` and run `apply` again.
 
 ## Limitations
 

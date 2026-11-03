@@ -23,8 +23,9 @@ You need:
   at your DNS provider. The cluster runs the authoritative DNS for its zone.
   With [private ingress](#private-ingress-on-aws) nothing is delegated in
   public DNS: you add a conditional forwarder on your internal DNS instead.
-- Optional: a **license key** from boxd, for more than 16 worker vCPUs
-  ([License key](REFERENCE.md#license-key)). You can add it later.
+- A **license key** from boxd. The installer downloads boxd's releases with
+  it, and what it includes sets your worker vCPU limit
+  ([License key](REFERENCE.md#license-key)).
 - About an hour. Most of it is `apply`, which runs unattended for 20–40 minutes.
 
 ### How `./boxd-install` works
@@ -50,9 +51,9 @@ be pulled, it's built locally from `docker/`, once, in a few minutes.
 - **Environment:** `BOXD_STATE_KEY`, `AWS_PROFILE`, `AWS_REGION`,
   `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
   `AWS_SESSION_TOKEN`, `CLOUDSDK_CORE_PROJECT`, `BOXD_RELEASES_URL` (a copy
-  of boxd's release bucket, only for tests; a `file://` directory is mounted
+  of boxd's releases, only for tests; a `file://` directory is mounted
   read-only) and `BOXD_PRODUCT_LICENSE` (only for
-  [clusters from before the release bucket](REFERENCE.md#clusters-installed-before-the-release-bucket))
+  [clusters with a download key](REFERENCE.md#clusters-with-a-download-key))
   pass through from your shell, by name. Nothing else does.
 - **Native instead:** install `terraform` (>= 1.10), `ansible-playbook` with
   the `ansible.posix` collection, `python3` (>= 3.11), OpenSSL 3 (`openssl`:
@@ -79,9 +80,9 @@ so running this twice can't replace your key):
 ```
 
 Copy the state key into your password manager now
-(`grep STATE ~/.boxd-<cluster>.env` shows it). A [license key](REFERENCE.md#license-key),
-if you have one, is a file next to `cluster.toml`, not an environment
-variable.
+(`grep STATE ~/.boxd-<cluster>.env` shows it). Your
+[license key](REFERENCE.md#license-key) is a file next to `cluster.toml`
+(`license.key`), not an environment variable.
 
 **In every new shell**, before any installer command:
 
@@ -154,7 +155,8 @@ cp cluster.example.toml cluster.toml     # the same file as examples/gcp/cluster
 
 Edit it and change every value marked `CHANGE`: the cluster name, zone,
 project, region, state bucket, the certificate contact email, and the node
-names (start them with your cluster name). Leave `assets_version = "latest"`:
+names (start them with your cluster name). Save your license key in
+`license.key` next to it. Leave `assets_version = "latest"`:
 see [Upgrades](REFERENCE.md#upgrades-and-rollback). Then:
 
 ```sh
@@ -166,8 +168,8 @@ when you apply.
 
 **Worker machine types must support nested virtualization**, because boxd's
 microVMs run under KVM inside the instance: **N2 (recommended)** or N1. The
-default is `n2-standard-16` without a [license key](REFERENCE.md#license-key) and
-`n2-standard-32` with one; the example uses `n2-standard-16`. AMD
+default is `n2-standard-16` on the free tier and `n2-standard-32` with a
+[license key](REFERENCE.md#license-key) without the vCPU limit; the example uses `n2-standard-16`. AMD
 (N2D/C2D/T2D), Arm (T2A/C4A) and E2 machines don't support it on GCP and
 won't boot VMs. Other roles have no such constraint. The rest of the file is
 explained in [Nodes and roles](REFERENCE.md#nodes-and-roles) and
@@ -265,7 +267,8 @@ and `apply` creates IAM roles. Use SSO, an assumed role, or access keys.
   VPC, EC2, IAM, S3 and SSM resources.
 - **vCPU quota:** the example needs 24 vCPUs of "Running On-Demand Standard
   instances" (an `m7i.2xlarge` control node and an `m8i.4xlarge` worker; with
-  a license key the default worker is `m8i.8xlarge`, and the two need 40). New accounts often have less, and
+  a license key without the vCPU limit the default worker is `m8i.8xlarge`,
+  and the two need 40). New accounts often have less, and
   `apply` would fail halfway through terraform:
 
   ```sh
@@ -323,7 +326,8 @@ cp examples/aws/cluster.toml cluster.toml
 
 Edit it and change every value marked `CHANGE`: the cluster name, zone,
 region and availability zone, state bucket, the certificate contact email,
-and the node names (start them with your cluster name). Leave
+and the node names (start them with your cluster name). Save your license key
+in `license.key` next to it. Leave
 `assets_version = "latest"`: see [Upgrades](REFERENCE.md#upgrades-and-rollback). Then:
 
 ```sh
@@ -343,8 +347,9 @@ subnet and isn't one of the five addresses AWS reserves per subnet.
 **Worker instance types** need hardware virtualization. Two options:
 
 - **Nested virtualization** on C7i/M7i/R7i or C8i/M8i/R8i (including `-flex`
-  and `d` variants). The default is `m8i.4xlarge` without a
-  [license key](REFERENCE.md#license-key) and `m8i.8xlarge` with one; the installer turns
+  and `d` variants). The default is `m8i.4xlarge` on the free tier and
+  `m8i.8xlarge` with a [license key](REFERENCE.md#license-key) without the
+  vCPU limit; the installer turns
   nested virtualization on for the instance.
 - Any **`*.metal`** type (e.g. `c7i.metal-24xl`): no nested-virt overhead,
   which AWS recommends for latency-sensitive workloads, at a higher entry
@@ -627,7 +632,8 @@ cp examples/metal/cluster.toml cluster.toml
 
 Change every value marked `CHANGE`: the cluster name, zone, `vpc_cidr` (your
 private network), `interface` (the NIC on it), the certificate contact
-email, and the nodes. Each node takes:
+email, and the nodes. Save your license key in `license.key` next to it.
+Each node takes:
 
 | Key | |
 |---|---|
@@ -703,8 +709,8 @@ It checks ssh, sudo and `/dev/kvm` first, then: download and verify the
 assets → per-node configs → ansible (installs the boxd host kernel on
 workers, one reboot) → wait for the control plane → check workers
 registered → seed VM templates. It ends by printing the `Assets:` version it
-installed and the **glue records**. Without a license key it also counts the
-workers' CPUs and warns when they're over the free tier.
+installed and the **glue records**. On the free tier it also counts the
+workers' CPUs and warns when they're over the limit.
 
 **The state is a file.** Instead of a bucket, the encrypted state lives in
 `metal-state/<cluster>/installer-state.enc` next to `cluster.toml`, with a

@@ -39,12 +39,14 @@ def cmd_validate(args) -> int:
         log(f"warning: node names don't start with the cluster name {cfg.name!r}: "
             f"{', '.join(odd)}. They become instance names, so two clusters in one "
             "project or account can collide; rename them before the first apply.")
-    # A [license].key_file that is missing or not a key stops here. No
-    # terraform state here: workers without machine_type count as new ones.
+    # A [license].key_file that is missing or not a key stops here, and so
+    # does no key at all. No terraform state here: workers without
+    # machine_type count as new ones.
+    assets.require_key(cfg)
     if errs := telemetry.errors(cfg):
         raise InstallError("; ".join(errs))
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
-                + config.network_warnings(cfg) + config.storage_bundle_warnings(cfg))
+                + config.network_warnings(cfg))
     for warning in warnings:
         log(f"warning: {warning}")
     print("cluster.toml OK")
@@ -73,6 +75,7 @@ def _apply(cfg, args) -> int:
     # Before anything else: a [license].key_file that is missing or not a
     # key stops the apply; it never falls back to the free tier.
     key = license.key_path(cfg)
+    assets.require_key(cfg)
     if errs := telemetry.errors(cfg):
         raise InstallError("; ".join(errs))
     state = State(args.state_dir)
@@ -207,9 +210,9 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
         return
     if "bucket" not in assets.features(assets_root):
         raise InstallError(
-            f"[storage_engine] needs a storage bundle, and {cfg.assets_version[:12]} is a "
-            "file-only one (its manifest lists no \"bucket\" feature). Set "
-            '[cluster].assets_version = "storage/latest" (or a storage bundle\'s id), or remove '
+            f"[storage_engine] needs a release with bucket storage, and {cfg.assets_version[:12]} "
+            "is one without it (its manifest lists no \"bucket\" feature). Bucket storage "
+            "comes with a license key that includes it: ask your boxd contact, or remove "
             "[storage_engine]")
 
 def check_network_mode(cfg, state) -> None:

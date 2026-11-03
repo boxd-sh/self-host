@@ -111,7 +111,8 @@ def check_guard(cfg, state, assets_root: str) -> Context:
             "the storage catalog is off on a cluster that runs the storage engine: someone "
             "turned it off (before rolling a node back?), and engine machines can't open their "
             "disks until it is on again. Turn it back on with "
-            "`boxd-ctl cluster set-storage-catalog on` once every node runs the storage bundle, "
+            "`boxd-ctl cluster set-storage-catalog on` once every node runs a release with bucket "
+            "storage, "
             "then re-apply. apply never turns it off, nor back on by itself")
     return ctx
 
@@ -181,7 +182,7 @@ def wait_bucket_open(cfg, timeout: int = BUCKET_OPEN_TIMEOUT) -> None:
                                    "your own bucket)")
             if FILE_ONLY_LINE in line:
                 raise InstallError(f"{node.name} runs a boxd-worker built without the storage "
-                                   "engine; the bundle should be a storage bundle")
+                                   "engine; the release should include bucket storage")
             if time.time() >= deadline:
                 raise InstallError(f"{node.name} did not report opening the storage engine's "
                                    f"bucket within {timeout}s (`journalctl -u boxd-worker` there)")

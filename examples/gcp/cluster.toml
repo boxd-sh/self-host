@@ -57,10 +57,11 @@ state_bucket = "boxd-gcp-demo-state"
 contact_email = "ops@example.com"
 
 [license]
-# Optional. The file with your boxd license key, next to this one (it is
-# git-ignored). Without a key the cluster has the boxd free tier: up to 16
+# CHANGE. The file with your boxd license key, next to this one (it is
+# git-ignored). boxd releases are downloaded with it, so every cluster needs
+# one. A key without unlimited worker vCPUs is the boxd free tier: up to 16
 # worker vCPUs. apply installs the key on every run. README "License key".
-# key_file = "license.key"
+key_file = "license.key"
 
 [telemetry]
 # The cluster sends boxd one usage report an hour: counts only, no personal
@@ -95,7 +96,7 @@ internal_ip = "10.60.0.10"
 name         = "boxd-gcp-demo-worker-0"
 roles        = ["worker"]
 internal_ip  = "10.60.0.20"
-machine_type = "n2-standard-16"          # default: n2-standard-16 without a license key, n2-standard-32 with one
+machine_type = "n2-standard-16"          # default: n2-standard-16 on the free tier, n2-standard-32 with unlimited worker vCPUs
 data_disk_gb = 500                       # required on workers: VM disks live here
 
 # ================================================================= 3. OPTIONAL
@@ -117,8 +118,8 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 # removed on the next apply), so list every size you want. Memory-heavy sizes
 # need memory-optimised workers (n2-highmem-*).
 # Bucket storage — machines' disks in an object store bucket, so they can move
-# between workers (docs/REFERENCE.md "Bucket storage"; needs a storage bundle,
-# assets_version = "storage/latest", and a license key with bucket-storage).
+# between workers (docs/REFERENCE.md "Bucket storage"; needs a license key
+# with bucket-storage).
 # apply creates the bucket.
 # [storage_engine]
 # default_vm_storage = "bucket"        # default; "file" keeps new machines on disk

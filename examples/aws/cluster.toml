@@ -57,10 +57,11 @@ state_bucket = "boxd-aws-demo-state-123456789012"
 contact_email = "ops@example.com"
 
 [license]
-# Optional. The file with your boxd license key, next to this one (it is
-# git-ignored). Without a key the cluster has the boxd free tier: up to 16
+# CHANGE. The file with your boxd license key, next to this one (it is
+# git-ignored). boxd releases are downloaded with it, so every cluster needs
+# one. A key without unlimited worker vCPUs is the boxd free tier: up to 16
 # worker vCPUs. apply installs the key on every run. README "License key".
-# key_file = "license.key"
+key_file = "license.key"
 
 [telemetry]
 # The cluster sends boxd one usage report an hour: counts only, no personal
@@ -95,7 +96,7 @@ internal_ip = "10.70.0.10"               # in public_subnet_cidr (it has the pro
 name         = "boxd-aws-demo-worker-0"
 roles        = ["worker"]
 internal_ip  = "10.70.1.10"              # in private_subnet_cidr
-machine_type = "m8i.4xlarge"             # default: m8i.4xlarge without a license key, m8i.8xlarge with one
+machine_type = "m8i.4xlarge"             # default: m8i.4xlarge on the free tier, m8i.8xlarge with unlimited worker vCPUs
 data_disk_gb = 500                       # required on workers: VM disks live here
 
 # ================================================================= 3. OPTIONAL
@@ -121,8 +122,8 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 #   archive_dir = "snapshot-archive"     # optional
 #
 # Bucket storage — machines' disks in an object store bucket, so they can move
-# between workers (README "Bucket storage"; needs a storage bundle,
-# assets_version = "storage/latest", and a license key with bucket-storage).
+# between workers (README "Bucket storage"; needs a license key
+# with bucket-storage).
 # apply creates the bucket:
 #   [storage_engine]
 #   default_vm_storage = "bucket"        # default; "file" keeps new machines on disk

@@ -136,11 +136,17 @@ other ports, the VPC or other private ranges, or the cloud metadata service.
 
 ### License key
 
-Without a license key, a boxd cluster has the **free tier**: its workers may
-have at most **16 vCPUs** in all (the logical CPUs of the worker hosts; the
-vCPUs your machines get don't count). A cluster over the limit keeps working
-and keeps its machines, but refuses new ones until it is under the limit
-again or has a key. A license key from boxd unlocks more.
+Every cluster needs a license key from boxd. The installer downloads boxd's
+releases with it: boxd publishes the releases for each key under a path made
+from that key, and only that key finds them. Keep it as private as the state
+key.
+
+What the key includes decides the rest. A key without unlimited worker vCPUs
+is the **free tier**: the workers may have at most **16 vCPUs** in all (the
+logical CPUs of the worker hosts; the vCPUs your machines get don't count). A
+cluster over the limit keeps working and keeps its machines, but refuses new
+ones until it is under the limit again or has a key without the limit.
+`boxd-ctl license status` on a control node lists a key's features.
 
 Put the key in a file next to `cluster.toml` and name it:
 
@@ -161,12 +167,15 @@ verify stops the apply with the reason. To replace a key, replace the file
 and apply. `boxd-ctl license status` on a control node shows the key's
 state, its expiry and the worker vCPU count; it never shows the key.
 
-When `key_file` is set, the file must exist and hold the key (one line that
-starts with `boxd-lic`): otherwise `validate` and `apply` stop with an error
+Without `key_file`, or when the file is missing or doesn't hold a key (one
+line that starts with `boxd-lic`), `validate` and `apply` stop with an error
 before anything changes. A cluster never drops to the free tier because of a
 typo.
 
-Without a key:
+When the key changes (a renewal, or a key with more features), boxd publishes
+your releases for the new key: replace the file and apply.
+
+On the free tier:
 
 - a **new** worker with no `machine_type` gets a 16-vCPU type (`m8i.4xlarge`
   on AWS, `n2-standard-16` on GCP) instead of the 32-vCPU default, so one
@@ -177,7 +186,7 @@ Without a key:
   so); on an existing cluster `apply` counts the types the workers have, and
   can warn when `validate` didn't.
 
-A worker that already exists keeps the type it has, with or without a key:
+A worker that already exists keeps the type it has, whatever the key includes:
 the license never resizes a running worker (boxd never stops a machine
 because of the license). Set `machine_type` to change it.
 
@@ -775,21 +784,16 @@ source ~/.boxd-<cluster>.env
 `assets_version` picks the boxd release the cluster runs:
 
 - **`"latest"`** (the default): every `apply` installs the newest release boxd
-  has published, so an `apply` you run to change a setting
-  also upgrades boxd if a new release is out. boxd moves `latest` only after
-  testing a release.
-- **A 40-character version id** (a git sha): the cluster stays on exactly
-  that release until you change it. Use this if every upgrade must be a
-  planned change.
-- **`"storage/latest"`**: the newest storage bundle. boxd builds each release
-  twice: the standard bundle, and a storage bundle whose workers also run the
-  storage engine (machines' disks in an object store bucket, a licensed
-  feature). A storage bundle has a version id of its own, not the commit's.
+  has published for your license key, so an `apply` you run to change a
+  setting also upgrades boxd if a new release is out. boxd moves `latest`
+  only after testing a release.
+- **A 40-character version id**: the cluster stays on exactly that release
+  until you change it. Use this if every upgrade must be a planned change.
 
-A storage bundle is what `[storage_engine]` needs. `apply` refuses
-`[storage_engine]` with a standard bundle (the bundle's manifest lists no
-`bucket` feature), and `validate` warns when `[storage_engine]` comes with a
-channel other than `storage/*`. See [Bucket storage](#bucket-storage-storage_engine).
+The releases boxd publishes for your key match what it includes. When it
+includes [bucket storage](#bucket-storage-storage_engine), `latest` is a
+release with it. `apply` refuses `[storage_engine]` with a release without it
+(the release's manifest lists no `bucket` feature).
 
 Every `apply` prints the version it installed (`Assets: <sha> (channel latest)`)
 and records it in the installer state. Note it down: it's the exact value to
@@ -841,14 +845,15 @@ telemetry opt-out ([Telemetry](#telemetry)). A copy of the installer boxd
 made for you already defaults to `[telemetry] enabled = false`; with any
 other copy, set it in `cluster.toml`.
 
-#### Clusters installed before the release bucket
+#### Clusters with a download key
 
-If boxd gave you a product license (64 hex characters) to download releases,
+If boxd gave you a download key (64 hex characters) before license keys,
 your env file sets `BOXD_PRODUCT_LICENSE`. While it's set, the installer
-downloads from your own release path, as before, and not from the release
-bucket. Keep it set until your boxd contact tells you to switch. Then delete
-the `BOXD_PRODUCT_LICENSE` line from `~/.boxd-<cluster>.env`, open a new
-shell, and apply. Nothing else changes. A new cluster never needs it.
+downloads from that key's path, as before, and not with your license key.
+Keep it set until your boxd contact tells you to switch. Then check that
+`[license] key_file` names your license key, delete the
+`BOXD_PRODUCT_LICENSE` line from `~/.boxd-<cluster>.env`, open a new shell,
+and apply. A new cluster never needs it.
 
 ### boxd-ctl (operator CLI)
 
@@ -1163,8 +1168,8 @@ boxd's storage engine keeps machines' disks in an object store bucket instead
 of on one worker's disk, so any worker can open them. A machine then moves
 between workers (live migration with `[network] mode = "routed"`, relocated
 wakes), and a hibernated one's memory waits in the bucket. It is a licensed
-feature: the license key needs `bucket-storage`, and the cluster runs a storage
-bundle (`assets_version = "storage/latest"`, or a storage bundle's id).
+feature: the license key needs `bucket-storage`, and the cluster runs a release
+with bucket storage (with such a key, `latest` is one).
 
 ```toml
 [storage_engine]                       # every worker runs the engine
@@ -1356,12 +1361,13 @@ When the cluster is gone for good, also:
   - *"This cluster isn't set up yet"*: `bootstrap_admin` waits for its
     person's first sign-in. When it's their email but the provider marks it
     unverified, or the account is an Entra ID guest, the message says so.
-- **`download failed (404)`** for a release: `assets_version` names a version
-  boxd hasn't published (a typo in a pinned sha, or a channel name boxd
-  doesn't publish). `download failed (403)` means the release bucket refused the
-  download; if it persists, tell boxd.
+- **`boxd has published no such release for this license key`**: either
+  `license.key` doesn't hold the key boxd sent you (an old key after a
+  renewal, or a copy from another cluster), or `assets_version` names a
+  version boxd hasn't published for it (a typo in a pinned id, or a channel
+  name boxd doesn't publish). If both are right, tell boxd.
 - **`assets download failed (403/404)`**, on a
-  [cluster from before the release bucket](#clusters-installed-before-the-release-bucket):
+  [cluster with a download key](#clusters-with-a-download-key):
   `BOXD_PRODUCT_LICENSE` is wrong or not set in this shell
   (`source ~/.boxd-<cluster>.env`), or `assets_version` doesn't match a
   release published for you.

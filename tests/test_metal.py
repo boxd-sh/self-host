@@ -22,6 +22,13 @@ def metal_doc() -> dict:
     with open(os.path.join(ROOT, "examples", "metal", "cluster.toml"), "rb") as fh:
         return tomllib.load(fh)
 
+def free_key_dir() -> str:
+    """A cluster.toml directory whose license.key is the free tier's."""
+    d = tempfile.mkdtemp(prefix="metal-")
+    with open(os.path.join(d, "license.key"), "w") as fh:
+        fh.write("boxd-lic1_not-a-real-key\n")
+    return d
+
 def worker(doc) -> dict:
     return next(n for n in doc["nodes"] if "worker" in n["roles"])
 
@@ -165,10 +172,11 @@ class MetalState(unittest.TestCase):
 
 class MetalLicense(unittest.TestCase):
     def test_validate_counts_nothing(self):
-        self.assertEqual(license.free_tier_warnings(config.Config(metal_doc()), assume_new=True), [])
+        cfg = config.Config(metal_doc(), free_key_dir())
+        self.assertEqual(license.free_tier_warnings(cfg, assume_new=True), [])
 
     def test_counted_on_the_hosts(self):
-        cfg = config.Config(metal_doc())
+        cfg = config.Config(metal_doc(), free_key_dir())
         self.assertEqual(license.free_tier_warnings(cfg, counted={"boxd-metal-worker-0": 16}), [])
         warn = license.free_tier_warnings(cfg, counted={"boxd-metal-worker-0": 64})
         self.assertEqual(len(warn), 1)

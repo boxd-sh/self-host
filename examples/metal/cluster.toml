@@ -53,10 +53,11 @@ interface = "eno2"
 contact_email = "ops@example.com"
 
 [license]
-# Optional. The file with your boxd license key, next to this one (it is
-# git-ignored). Without a key the cluster has the boxd free tier: up to 16
-# worker vCPUs (the logical CPUs of the worker hosts). README "License key".
-# key_file = "license.key"
+# CHANGE. The file with your boxd license key, next to this one (it is
+# git-ignored). boxd releases are downloaded with it, so every cluster needs
+# one. A key without unlimited worker vCPUs is the boxd free tier: up to 16
+# worker vCPUs. apply installs the key on every run. README "License key".
+key_file = "license.key"
 
 [telemetry]
 # The cluster sends boxd one usage report an hour: counts only, no personal
@@ -108,8 +109,8 @@ data_disk   = "/dev/nvme1n1"             # CHANGE
 # 2 · 8 and 4 · 16. The list REPLACES the defaults (sizes left out are
 # removed on the next apply), so list every size you want.
 # Bucket storage — machines' disks in an object store bucket, so they can move
-# between workers (docs/REFERENCE.md "Bucket storage"; needs a storage bundle,
-# assets_version = "storage/latest", and a license key with bucket-storage).
+# between workers (docs/REFERENCE.md "Bucket storage"; needs a license key
+# with bucket-storage).
 # On bare metal, bring the bucket: its store goes in the providers config
 # (`providers edit`, [storage_engine] endpoint, region, bucket, access_key,
 # secret_key).

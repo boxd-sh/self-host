@@ -1,15 +1,17 @@
 """Ensure the versioned assets zip is downloaded, verified and extracted at
 state/assets/<sha>/.
 
-The bundles are in boxd's release bucket, one per boxd commit:
-    bundles/<sha>/boxd-assets-<sha>.zip, release.json, release.json.sig
+boxd publishes the releases of each license under a path made from its
+license key (base_url), one bundle per release:
+    bundles/<id>/boxd-assets-<id>.zip, release.json, release.json.sig
     channels/<channel>, channels/<channel>.<sequence>.sig
 Every signature is checked with `openssl pkeyutl -verify -rawin` against the
-public keys in release-keys/ before anything is unpacked.
+public keys in release-keys/ before anything is unpacked. The path is made
+from the key, so it is as secret as the key: never log or print it.
 
-A cluster installed before the release bucket sets BOXD_PRODUCT_LICENSE and
-keeps its old download path (the _legacy_* functions) until it is moved to
-the release bucket. The key is an env var only, never in cluster.toml."""
+A cluster installed before license keys sets BOXD_PRODUCT_LICENSE and keeps
+its old download path (the _legacy_* functions) until it is moved. That key
+is an env var only, never in cluster.toml."""
 import base64
 import functools
 import hashlib
@@ -24,11 +26,16 @@ import urllib.error
 import urllib.request
 import zipfile
 
+from . import license
 from .util import InstallError, log
 
-# BOXD_RELEASES_URL: a copy of the bucket (file:// works), to test a bundle.
-# The signatures are checked all the same.
-BASE_URL = os.environ.get("BOXD_RELEASES_URL", "https://storage.googleapis.com/boxd-releases").rstrip("/")
+# Where boxd publishes the releases of every license, each under its own
+# path (base_url). BOXD_RELEASES_URL: a copy of it (file:// works), to test
+# a bundle. The signatures are checked all the same.
+BASE_URL = os.environ.get("BOXD_RELEASES_URL", "https://storage.googleapis.com/self-host-assets").rstrip("/")
+# The context prefix of a download path: the path names the key's releases
+# without giving the key away.
+DOWNLOAD_PREFIX = b"boxd-download-v1\0"
 KEYS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "release-keys")
 # The context prefix of a signed message: a channel signature can never pass
 # as a release signature, and the other way round.
@@ -42,6 +49,21 @@ def assets_dir(cache_dir: str, sha: str) -> str:
 def _legacy() -> bool:
     return bool(os.environ.get("BOXD_PRODUCT_LICENSE"))
 
+def download_id(key: str) -> str:
+    """The path boxd publishes a license key's releases under."""
+    return hashlib.sha256(DOWNLOAD_PREFIX + key.strip().encode()).hexdigest()
+
+def base_url(cfg) -> str:
+    """Where this cluster's releases are: BASE_URL/<download_id(key)>. It
+    carries a secret: never log or print it."""
+    return f"{BASE_URL}/{download_id(license.key_text(cfg))}"
+
+def require_key(cfg) -> None:
+    """Stop when there is no license key to download releases with (the old
+    path downloads with BOXD_PRODUCT_LICENSE instead)."""
+    if not _legacy():
+        license.key_text(cfg)
+
 def resolve(cfg, state) -> str:
     """Turn a channel `assets_version` ("latest") into the sha it points at.
     A sha passes through untouched (no network). Swaps the sha into
@@ -50,17 +72,17 @@ def resolve(cfg, state) -> str:
     v = cfg.assets_version
     if SHA_RE.fullmatch(v):
         return v
-    sha = _legacy_resolve(v) if _legacy() else _signed_resolve(v, state)
+    sha = _legacy_resolve(v) if _legacy() else _signed_resolve(base_url(cfg), v, state)
     cfg.assets_channel, cfg.assets_version = v, sha
     return sha
 
-def zip_url(sha: str) -> str:
+def zip_url(cfg, sha: str) -> str:
     """The bundle's URL, for nodes that download it themselves (they check
-    it against the manifest hashes ensure() verified). On the old path it
-    carries the download key: never log or print it."""
+    it against the manifest hashes ensure() verified). It carries a secret
+    (the license path, or the old download key): never log or print it."""
     if _legacy():
         return _legacy_zip_url(sha)
-    return f"{BASE_URL}/bundles/{sha}/boxd-assets-{sha}.zip"
+    return f"{base_url(cfg)}/bundles/{sha}/boxd-assets-{sha}.zip"
 
 def ensure(cfg, cache_dir: str, state) -> str:
     sha = resolve(cfg, state)
@@ -75,7 +97,7 @@ def ensure(cfg, cache_dir: str, state) -> str:
             # failed download (offline, 403) leaves the copy as it was.
             log(f"the local cache {dest} {why}: downloading assets {sha[:8]} again")
             try:
-                return _signed_ensure(sha, cache_dir, dest)
+                return _signed_ensure(base_url(cfg), sha, cache_dir, dest)
             except DownloadFailed as e:
                 # Only a failed download gets the cache advice. A refusal of
                 # what came down (a bad signature, a zip that does not
@@ -102,13 +124,13 @@ def ensure(cfg, cache_dir: str, state) -> str:
                 os.remove(tmp_zip)
             raise
         return _extract(tmp_zip, sha, dest)
-    return _signed_ensure(sha, cache_dir, dest)
+    return _signed_ensure(base_url(cfg), sha, cache_dir, dest)
 
-def _signed_ensure(sha: str, cache_dir: str, dest: str) -> str:
+def _signed_ensure(base: str, sha: str, cache_dir: str, dest: str) -> str:
     tmp_zip = os.path.join(cache_dir, "assets", f".download-{sha}.zip")
     os.makedirs(os.path.dirname(tmp_zip), exist_ok=True)
     try:
-        body, sig, rel = _signed_download(sha, tmp_zip)
+        body, sig, rel = _signed_download(base, sha, tmp_zip)
     except BaseException:
         if os.path.exists(tmp_zip):
             os.remove(tmp_zip)
@@ -119,7 +141,7 @@ def _signed_ensure(sha: str, cache_dir: str, dest: str) -> str:
     return _extract(tmp_zip, sha, dest, manifest_sha256=rel["manifest_sha256"],
                     extra=dict(zip(SIGNED_MARKER, (body, sig))))
 
-# ------------------------------------------------- the signed release bucket --
+# --------------------------------------------------- the signed releases --
 
 SIGNED_MARKER = (".release.json", ".release.json.sig")
 # _signed_cache_problem's answer for a copy the old path unpacked: not
@@ -136,10 +158,11 @@ class UnknownKey(CannotCheck):
     download: update the installer. From the local cache: the cache is
     damaged (_signed_cache_problem)."""
 
-# GCS answers 401/403 when the bucket refuses the download.
-PRIVATE_HINT = (" — the boxd release bucket refused the download; if it persists, tell boxd. "
-                "A cluster installed before the release bucket sets BOXD_PRODUCT_LICENSE "
-                "(the old download path) until your boxd contact moves it")
+# GCS answers 403 for an object it won't serve, and for one that isn't
+# there: either way, nothing is published for this key under that name.
+PRIVATE_HINT = (" — boxd has published no such release for this license key. Check that "
+                "[license] key_file holds the key boxd sent you, and [cluster].assets_version; "
+                "if both are right, ask your boxd contact")
 
 class DownloadFailed(InstallError):
     """The network or the bucket said no (HTTP error, unreachable). Never a
@@ -150,7 +173,7 @@ class DownloadFailed(InstallError):
         self.private = private
 
 def _http_error(what: str, e: urllib.error.HTTPError) -> DownloadFailed:
-    private = e.code in (401, 403)
+    private = e.code in (401, 403, 404)
     return DownloadFailed(f"{what}: download failed ({e.code})" + (PRIVATE_HINT if private else ""), private)
 
 def _get(url: str, what: str, limit: int | None = None) -> bytes:
@@ -180,8 +203,13 @@ def _download_error(what: str, e: Exception) -> DownloadFailed:
     if isinstance(e, urllib.error.HTTPError):
         return _http_error(what, e)
     if isinstance(e, urllib.error.URLError):
-        return DownloadFailed(f"{what}: download failed ({e.reason})")
-    return DownloadFailed(f"{what}: download failed ({type(e).__name__}: {e})")
+        return DownloadFailed(f"{what}: download failed ({_no_url(e.reason)})")
+    return DownloadFailed(f"{what}: download failed ({type(e).__name__}: {_no_url(e)})")
+
+def _no_url(reason) -> str:
+    """An error's text without the download path in it (a file:// copy
+    names the missing file)."""
+    return re.sub(r"[0-9a-f]{64}", "<license path>", str(reason))
 
 def openssl_version() -> tuple[bool, str]:
     """(usable, what `openssl version` says). The check needs OpenSSL 3 or
@@ -237,18 +265,21 @@ def verify_signature(message: bytes, sig_file: bytes, prefix: bytes, what: str) 
     raise InstallError(f"{what}: BAD signature. Nothing was installed. This is not a boxd "
                        "release: tell your boxd contact.")
 
-def _signed_resolve(channel: str, state) -> str:
+def _signed_resolve(base: str, channel: str, state) -> str:
     """channels/<name> holds {"format": 1, "channel", "sha", "sequence", ...};
     channels/<name>.<sequence>.sig is its signature. The highest sequence
-    number seen per channel is kept in the install state, and a lower one is
-    refused: a replaced pointer cannot move this cluster back."""
+    number seen per channel of each download path is kept in the install
+    state, and a lower one is refused: a replaced pointer cannot move this
+    cluster back. Another path (another key) numbers its channels anew."""
     what = f"assets channel {channel!r}"
     try:
-        body = _get(f"{BASE_URL}/channels/{channel}", what, 4096)
+        body = _get(f"{base}/channels/{channel}", what, 4096)
     except DownloadFailed as e:
+        if e.private:
+            raise
         raise DownloadFailed(
-            f"{e} — check [cluster].assets_version (\"latest\", \"beta\", or a 40-hex sha "
-            "from your release notes), or ask your boxd contact", e.private)
+            f"{e} — check [cluster].assets_version (\"latest\", or a release id from your "
+            "release notes), or ask your boxd contact")
     try:
         p = json.loads(body)
         seq = p["sequence"]
@@ -258,20 +289,26 @@ def _signed_resolve(channel: str, state) -> str:
         ok = False
     if not ok:
         raise InstallError(f"{what} is not a channel pointer: {body[:80]!r}")
-    verify_signature(body, _get(f"{BASE_URL}/channels/{channel}.{seq}.sig", f"{what} signature", 4096),
+    verify_signature(body, _get(f"{base}/channels/{channel}.{seq}.sig", f"{what} signature", 4096),
                      CHANNEL_PREFIX, what)
     if p.get("channel") != channel:
         raise InstallError(f"{what} holds the pointer of channel {p.get('channel')!r}")
     seen = state.data.setdefault("assets_channel_sequences", {})
-    if seq < seen.get(channel, 0):
+    name = sequence_name(base, channel)
+    if seq < seen.get(name, 0):
         raise InstallError(
-            f"{what} is at sequence {seq}, but this cluster has seen {seen[channel]}: the "
+            f"{what} is at sequence {seq}, but this cluster has seen {seen[name]}: the "
             "pointer is older than one it already followed, so it is refused. To go back "
             "to an older release on purpose, pin its sha in [cluster].assets_version.")
-    seen[channel] = seq
+    seen[name] = seq
     state.save()
-    log(f"assets channel {channel} -> {p['sha']} (sequence {seq}; pin this sha to stay on it)")
+    log(f"assets channel {channel} -> {p['sha']} (sequence {seq}; pin this id to stay on it)")
     return p["sha"]
+
+def sequence_name(base: str, channel: str) -> str:
+    """The install state's name for a channel of one download path: a hash
+    of the path, not the path itself."""
+    return f"{hashlib.sha256(base.encode()).hexdigest()[:16]}/{channel}"
 
 def _check_release(body: bytes, sig: bytes, sha: str, what: str | None = None) -> dict:
     """release.json's signature, format and sha; returns it."""
@@ -330,11 +367,11 @@ def _signed_cache_problem(dest: str, sha: str) -> str | None:
         return f"cannot be read ({e})"
     return None
 
-def _signed_download(sha: str, tmp_zip: str) -> tuple[bytes, bytes, dict]:
+def _signed_download(base: str, sha: str, tmp_zip: str) -> tuple[bytes, bytes, dict]:
     """release.json and its signature, then the zip they describe. Any
     failure raises before anything is unpacked. Returns release.json, its
     signature, and release.json decoded."""
-    base = f"{BASE_URL}/bundles/{sha}"
+    base = f"{base}/bundles/{sha}"
     what = f"assets {sha[:8]}"
     body = _get(f"{base}/release.json", f"{what} release.json", 1 << 16)
     sig = _get(f"{base}/release.json.sig", f"{what} signature", 4096)
@@ -460,10 +497,8 @@ def _load_manifest(root: str) -> dict:
         return json.load(fh)
 
 def bundle_id(manifest: dict) -> str:
-    """What a bundle is pinned and published by. boxd makes two bundles of
-    one commit: the file-only one keeps the commit sha as its id, and the
-    bucket one (the storage engine) gets an id of its own. A manifest from
-    before the split has no bundle_id: its id is its git_sha."""
+    """What a release is pinned and published by: its manifest's bundle_id.
+    A manifest without one is known by its git_sha."""
     return manifest.get("bundle_id", manifest["git_sha"])
 
 def features(root: str) -> list[str]:

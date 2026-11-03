@@ -1,11 +1,13 @@
 """The boxd license key: [license] key_file in
 cluster.toml, the free tier's worker vCPU limit, and the default worker type
-without a key.
+for the free tier.
 
-Without a valid license key a boxd cluster may have at most 16 worker vCPUs
-(the logical CPUs of its worker hosts). It keeps working over the limit, but
-refuses new machines while it is over. A key unlocks more; `apply` installs
-it on the cluster with `boxd-ctl license install` every time.
+Every cluster has a license key: boxd releases are downloaded with it
+(assets.base_url). A key without the unlimited-worker-vcpus feature is the
+free tier: the cluster may have at most 16 worker vCPUs (the logical CPUs of
+its worker hosts). It keeps working over the limit, but refuses new machines
+while it is over. `apply` installs the key on the cluster with
+`boxd-ctl license install` every time.
 
 boxd never stops a VM because of the license, so the license
 never resizes a worker that exists: the free default type is only for
@@ -20,9 +22,10 @@ from .util import InstallError
 
 FREE_TIER_MAX_WORKER_VCPUS = 16
 
-# The worker type when a new [[nodes]] worker sets no machine_type and there
-# is no license key: one of these is free. With a key, terraform's defaults
-# apply (m8i.8xlarge, n2-standard-32: terraform/<cloud>/variables.tf).
+# The worker type when a new [[nodes]] worker sets no machine_type on the
+# free tier: one of these is within its limit. With unlimited worker vCPUs,
+# terraform's defaults apply (m8i.8xlarge, n2-standard-32:
+# terraform/<cloud>/variables.tf).
 FREE_WORKER_TYPES = {"aws": "m8i.4xlarge", "gcp": "n2-standard-16"}
 PAID_WORKER_TYPES = {"aws": "m8i.8xlarge", "gcp": "n2-standard-32"}
 
@@ -67,8 +70,7 @@ def key_path(cfg) -> str | None:
     shown = os.path.relpath(path, cfg.base_dir)
     if not os.path.isfile(path):
         raise InstallError(f"[license].key_file {shown} does not exist. Put the license key "
-                           "from boxd in it, or remove [license] to install without a key "
-                           "(the boxd free tier)")
+                           "from boxd in it")
     try:
         with open(path, errors="replace") as fh:
             lines = [line.strip() for line in fh.read().splitlines() if line.strip()]
@@ -85,6 +87,21 @@ def key_path(cfg) -> str | None:
     return path
 
 
+def key_text(cfg) -> str:
+    """The configured license key, one line. Every cluster needs one: boxd
+    releases are downloaded with it."""
+    path = key_path(cfg)
+    if path is None:
+        raise InstallError(NO_KEY)
+    with open(path, errors="replace") as fh:
+        return next(line.strip() for line in fh.read().splitlines() if line.strip())
+
+
+NO_KEY = ("cluster.toml has no license key. boxd releases are downloaded with your license "
+          "key: put the key from boxd in a file next to cluster.toml and name it in "
+          '[license] key_file = "license.key". No key yet? Ask your boxd contact')
+
+
 # The features a key can carry, by their number in the key. The numbers are
 # fixed by boxd's license format and never reused.
 FEATURE_NAMES = {
@@ -94,6 +111,7 @@ FEATURE_NAMES = {
     4: "usage-billing",
 }
 USAGE_BILLING = "usage-billing"
+UNLIMITED_WORKER_VCPUS = "unlimited-worker-vcpus"
 
 
 def _varint(data: bytes, i: int) -> tuple[int, int]:
@@ -184,6 +202,11 @@ def usage_billing(cfg) -> bool:
     return USAGE_BILLING in key_features(cfg)
 
 
+def unlimited_vcpus(cfg) -> bool:
+    """The configured key lifts the free tier's worker vCPU limit."""
+    return UNLIMITED_WORKER_VCPUS in key_features(cfg)
+
+
 def vcpus(cloud: str, machine_type: str) -> int | None:
     """The published vCPU count of a machine type; None when unknown."""
     if cloud == "aws":
@@ -202,7 +225,7 @@ def vcpus(cloud: str, machine_type: str) -> int | None:
 
 def default_worker_type(cfg) -> str:
     """A new worker's type when its [[nodes]] entry sets none."""
-    table = PAID_WORKER_TYPES if key_path(cfg) else FREE_WORKER_TYPES
+    table = PAID_WORKER_TYPES if unlimited_vcpus(cfg) else FREE_WORKER_TYPES
     return table[cfg.cloud_name]
 
 
@@ -215,15 +238,15 @@ def worker_type(cfg, node, existing: dict[str, str] | None = None) -> str:
 def tfvars_machine_type(cfg, node, existing: dict[str, str] | None = None) -> str | None:
     """What tfvars passes for a node. Its own machine_type always wins. A
     worker that exists keeps the type it has (`existing`, from the terraform
-    state), with or without a key. A new worker without a key gets the free
-    type. None lets terraform's default apply."""
+    state), whatever the key allows. A new worker on the free tier gets the
+    free type. None lets terraform's default apply."""
     if node.machine_type:
         return node.machine_type
     if not node.has("worker"):
         return None
     if current := (existing or {}).get(node.name):
         return current
-    if not key_path(cfg):
+    if not unlimited_vcpus(cfg):
         return FREE_WORKER_TYPES[cfg.cloud_name]
     return None
 
@@ -231,7 +254,7 @@ def tfvars_machine_type(cfg, node, existing: dict[str, str] | None = None) -> st
 def free_tier_warnings(cfg, existing: dict[str, str] | None = None,
                        assume_new: bool = False,
                        counted: dict[str, int] | None = None) -> list[str]:
-    """Without a key: the workers over the free limit, and worker types whose
+    """On the free tier: the workers over its limit, and worker types whose
     vCPUs are unknown. Never an error: the cluster installs and runs, and
     refuses new machines while it is over. Raises when [license].key_file is
     set but not usable (key_path). `assume_new` (validate, which has no
@@ -240,7 +263,8 @@ def free_tier_warnings(cfg, existing: dict[str, str] | None = None,
     that exist. Under the limit validate says nothing; apply checks the real
     types anyway. `counted`: each worker's logical CPUs, read on the host
     (metal, which has no machine types); without it metal says nothing."""
-    if key_path(cfg):
+    key_path(cfg)
+    if unlimited_vcpus(cfg):
         return []
     if counted is None and not clouds.provisions(cfg):
         return []
@@ -257,14 +281,14 @@ def free_tier_warnings(cfg, existing: dict[str, str] | None = None,
         else:
             total += v
     if total > FREE_TIER_MAX_WORKER_VCPUS:
-        out.append(f"the workers have {total} vCPUs and there is no license key; the boxd free "
-                   f"tier allows {FREE_TIER_MAX_WORKER_VCPUS}. The cluster installs and works, "
-                   "but it refuses new machines while it is over the limit. Add a license key "
-                   "([license] key_file) or use fewer or smaller workers."
+        out.append(f"the workers have {total} vCPUs, and the boxd free tier allows "
+                   f"{FREE_TIER_MAX_WORKER_VCPUS}. The cluster installs and works, but it "
+                   "refuses new machines while it is over the limit. Ask boxd for a license "
+                   "key with unlimited worker vCPUs, or use fewer or smaller workers."
                    + (_ASSUMED_NEW if assume_new and _untyped_workers(cfg) else ""))
     if unknown:
         out.append(f"cannot count the vCPUs of {', '.join(unknown)}: the free tier allows "
-                   f"{FREE_TIER_MAX_WORKER_VCPUS} worker vCPUs without a license key")
+                   f"{FREE_TIER_MAX_WORKER_VCPUS} worker vCPUs")
     return out
 
 

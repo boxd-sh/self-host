@@ -1,7 +1,7 @@
-"""Bundles from the signed release bucket: the channel pointer, its
+"""Signed bundles from the license's path: the channel pointer, its
 sequence number, release.json and the zip, checked before anything is
 unpacked. A fake bucket (files in a temporary directory, as file:// URLs) and
-a local key pair stand in for gs://boxd-releases and the release key.
+a local key pair stand in for boxd's downloads bucket and the release key.
 Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import base64
@@ -41,18 +41,32 @@ HAVE_ED25519 = _openssl_has_ed25519()
 NEEDS_ED25519 = unittest.skipUnless(HAVE_ED25519, "openssl lacks OpenSSL 3 / Ed25519")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 OLD = "fedcba9876543210fedcba9876543210fedcba98"
+# Shaped like a license key; only its text matters here (the download path).
+KEY = "boxd-lic1_release-bundles-test-key"
 
 def doc(version: str) -> dict:
+    """The AWS example with this assets_version and [license] key_file; the
+    key file is written by key_dir."""
     with open(os.path.join(ROOT, "examples", "aws", "cluster.toml"), "rb") as fh:
         d = tomllib.load(fh)
     d["cluster"]["assets_version"] = version
+    d["license"] = {"key_file": "license.key"}
+    return d
+
+def key_dir(parent: str, key: str = KEY) -> str:
+    """A cluster.toml directory holding license.key."""
+    d = tempfile.mkdtemp(dir=parent)
+    with open(os.path.join(d, "license.key"), "w") as fh:
+        fh.write(key + "\n")
     return d
 
 class Bucket:
-    """bundles/ and channels/ in a directory, signed with a fresh key."""
+    """bundles/ and channels/ under a license's path in a directory (base:
+    the bucket, root: the license's path in it), signed with a fresh key."""
 
     def __init__(self, root: str):
-        self.root = os.path.join(root, "bucket")
+        self.base = os.path.join(root, "bucket")
+        self.root = os.path.join(self.base, assets.download_id(KEY))
         self.keys = os.path.join(root, "keys")
         os.makedirs(self.keys)
         self.key = os.path.join(root, "signing.pem")
@@ -128,16 +142,23 @@ class Case(unittest.TestCase):
         self.bucket = Bucket(self.tmp.name)
         self.cache = os.path.join(self.tmp.name, "cache")
         self.state = State(os.path.join(self.tmp.name, "state"))
+        self.cluster_dir = key_dir(self.tmp.name)
         env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
         for p in (mock.patch.dict(os.environ, env, clear=True),
-                  mock.patch.object(assets, "BASE_URL", "file://" + self.bucket.root),
+                  mock.patch.object(assets, "BASE_URL", "file://" + self.bucket.base),
                   mock.patch.object(assets, "KEYS_DIR", self.bucket.keys),
                   contextlib.redirect_stderr(io.StringIO())):
             p.__enter__()
             self.addCleanup(p.__exit__, None, None, None)
 
+    def config(self, version: str) -> config.Config:
+        return config.Config(doc(version), self.cluster_dir)
+
+    def seq_name(self, channel: str) -> str:
+        return assets.sequence_name(assets.base_url(self.config(channel)), channel)
+
     def ensure(self, version: str):
-        cfg = config.Config(doc(version))
+        cfg = self.config(version)
         return cfg, assets.ensure(cfg, self.cache, self.state)
 
     def unpacked(self, sha: str = SHA) -> bool:
@@ -160,7 +181,8 @@ class GoodBundles(Case):
         with open(os.path.join(root, "bin", "boxd-worker"), "rb") as fh:
             self.assertEqual(fh.read(), b"worker")
         # The sequence number is in the install state, on disk.
-        self.assertEqual(State(self.state.dir).data["assets_channel_sequences"], {"beta": 3})
+        self.assertEqual(State(self.state.dir).data["assets_channel_sequences"],
+                         {self.seq_name("beta"): 3})
 
     def test_a_pinned_sha_works_without_a_channel(self):
         self.bucket.bundle()
@@ -179,15 +201,56 @@ class GoodBundles(Case):
         self.bucket.channel("latest", SHA, 5)
         cfg, _ = self.ensure("latest")
         self.assertEqual(cfg.assets_version, SHA)
-        self.assertEqual(self.state.data["assets_channel_sequences"], {"latest": 5})
+        self.assertEqual(self.state.data["assets_channel_sequences"], {self.seq_name("latest"): 5})
 
-    def test_nodes_download_from_the_release_bucket(self):
-        self.assertEqual(assets.zip_url(SHA),
+    def test_nodes_download_from_the_license_path(self):
+        cfg = self.config(SHA)
+        self.assertEqual(assets.zip_url(cfg, SHA),
                          f"file://{self.bucket.root}/bundles/{SHA}/boxd-assets-{SHA}.zip")
         with open(os.path.join(self.tmp.name, "MANIFEST.json"), "w") as fh:
             json.dump({"files": {}}, fh)
-        self.assertEqual(ansible.node_assets_vars(SHA, self.tmp.name)["boxd_assets_url"],
-                         assets.zip_url(SHA))
+        self.assertEqual(ansible.node_assets_vars(cfg, self.tmp.name)["boxd_assets_url"],
+                         assets.zip_url(cfg, SHA))
+
+    def test_the_path_is_made_from_the_whole_key(self):
+        """sha256 of a fixed prefix and the key's line: the same key (with or
+        without its newline) gives the same path, another key another."""
+        want = hashlib.sha256(b"boxd-download-v1\0" + KEY.encode()).hexdigest()
+        self.assertEqual(assets.download_id(KEY), want)
+        self.assertEqual(assets.download_id(KEY + "\n"), want)
+        self.assertNotEqual(assets.download_id(KEY + "x"), want)
+        self.assertNotIn(KEY, want)
+
+    def test_another_key_finds_no_release(self):
+        self.bucket.bundle()
+        self.bucket.channel("latest", SHA, 1)
+        cfg = config.Config(doc("latest"), key_dir(self.tmp.name, KEY + "-other"))
+        # GCS answers 403 here (the hint: test_resolve_keeps_private_through_its_rewrap);
+        # a file:// copy, a missing file.
+        with self.assertRaises(assets.DownloadFailed) as cm:
+            assets.ensure(cfg, self.cache, self.state)
+        self.assertNotIn(assets.download_id(KEY + "-other"), str(cm.exception))
+        self.assertFalse(self.unpacked())
+
+    def test_no_key_stops_before_any_download(self):
+        cfg = config.Config(doc("latest"), self.tmp.name)
+        cfg.doc.pop("license")
+        with mock.patch.object(assets.urllib.request, "urlopen",
+                               mock.Mock(side_effect=AssertionError("no download"))):
+            with self.assertRaisesRegex(InstallError, "has no license key"):
+                assets.ensure(cfg, self.cache, self.state)
+
+    def test_the_path_is_never_printed(self):
+        """Nothing the installer logs while installing names the license
+        path, the key, or the bucket's URL with them."""
+        self.bucket.bundle()
+        self.bucket.channel("latest", SHA, 1)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(err):
+            self.ensure("latest")
+        self.assertIn("assets channel latest", err.getvalue())
+        for secret in (assets.download_id(KEY), KEY):
+            self.assertNotIn(secret, err.getvalue())
 
 class Refused(Case):
     def test_a_bad_release_signature(self):
@@ -313,7 +376,20 @@ class Refused(Case):
         with self.assertRaisesRegex(InstallError, "sequence 4, but this cluster has seen 5"):
             self.ensure("latest")
         self.assertFalse(self.unpacked(OLD))
-        self.assertEqual(self.state.data["assets_channel_sequences"], {"latest": 5})
+        self.assertEqual(self.state.data["assets_channel_sequences"], {self.seq_name("latest"): 5})
+
+    def test_another_path_numbers_its_channels_anew(self):
+        """A cluster that followed another path's latest (an earlier release
+        source, or the key before a renewal) starts again at sequence 1 on
+        this one; the state never holds the path itself."""
+        self.state.data["assets_channel_sequences"] = {"latest": 7, "0123456789abcdef/latest": 9}
+        self.bucket.bundle()
+        self.bucket.channel("latest", SHA, 1)
+        cfg, _ = self.ensure("latest")
+        self.assertEqual(cfg.assets_version, SHA)
+        seqs = self.state.data["assets_channel_sequences"]
+        self.assertEqual(seqs[self.seq_name("latest")], 1)
+        self.assertNotIn(assets.download_id(KEY), json.dumps(seqs))
 
     def test_a_missing_channel_names_what_to_check(self):
         with self.assertRaises(InstallError) as cm:
@@ -491,7 +567,7 @@ class Cache(Case):
             with self.assertRaises(assets.DownloadFailed) as cm:
                 self.ensure(SHA)
         self.assertTrue(cm.exception.private)
-        self.assertIn("sets BOXD_PRODUCT_LICENSE (the old download path)", str(cm.exception))
+        self.assertIn("no such release for this license key", str(cm.exception))
         self.assertNotIn("Delete", str(cm.exception))
         with open(os.path.join(dest, "bin", "boxd-worker"), "rb") as fh:
             self.assertEqual(fh.read(), b"worker")
@@ -518,7 +594,7 @@ class Cache(Case):
         with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": "ab" * 32}), \
                 mock.patch.object(assets.urllib.request, "urlopen",
                                   mock.Mock(side_effect=AssertionError("no download"))):
-            cfg = config.Config(doc(SHA))
+            cfg = self.config(SHA)
             self.assertEqual(assets.ensure(cfg, self.cache, self.state), dest)
 
 class ReDownload(Case):
@@ -628,7 +704,7 @@ class ReDownload(Case):
                 self.assertIn(f"Delete {dest}, or run again when the download works", msg)
                 # The rewrap keeps .private (and the 403 hint).
                 self.assertIs(cm.exception.private, private)
-                self.assertEqual("sets BOXD_PRODUCT_LICENSE (the old download path)" in msg, private)
+                self.assertEqual("no such release for this license key" in msg, private)
                 self.assertTrue(os.path.exists(os.path.join(dest, "MANIFEST.json")))
 
     def test_an_unreadable_marker_is_damage_not_unsigned(self):
@@ -700,7 +776,7 @@ class CutOff(Case):
     b"" with no error. That is a cut-off download, not a bad release."""
 
     def serve(self, cut: str):
-        root, cut_path = self.bucket.root, cut
+        root, cut_path = self.bucket.base, os.path.relpath(os.path.join(self.bucket.root, cut), self.bucket.base)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -844,34 +920,44 @@ class NoNetworkOrKeys(unittest.TestCase):
         self.assertIn("needs OpenSSL 3 (found LibreSSL 3.3.6)", str(cm.exception))
         self.assertNotIn("BAD signature", str(cm.exception))
 
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def cfg(self) -> config.Config:
+        return config.Config(doc("latest"), key_dir(self.tmp.name))
+
     def test_resolve_keeps_private_through_its_rewrap(self):
+        """No release under this key's path (GCS: 403 for what it won't
+        serve or doesn't have) names the key and assets_version; any other
+        failure names assets_version."""
         env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
-        for code, private in ((403, True), (401, True), (404, False)):
+        for code, private in ((403, True), (401, True), (404, True), (500, False)):
             with self.subTest(code):
                 err = urllib.error.HTTPError("u", code, "x", {}, None)
                 with mock.patch.dict(os.environ, env, clear=True), \
                         mock.patch.object(assets.urllib.request, "urlopen", mock.Mock(side_effect=err)), \
                         contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(assets.DownloadFailed) as cm:
-                        assets.resolve(config.Config(doc("latest")), None)
+                        assets.resolve(self.cfg(), None)
                 self.assertIs(cm.exception.private, private)
                 self.assertIn("assets_version", str(cm.exception))
+                self.assertEqual("[license] key_file" in str(cm.exception), private)
 
-    def test_a_private_bucket_tells_current_customers_what_to_set(self):
-        cfg = config.Config(doc("latest"))
-        err = urllib.error.HTTPError("u", 403, "Forbidden", {}, None)
+    def test_an_unreachable_bucket_does_not_print_the_path(self):
         env = {k: v for k, v in os.environ.items() if k != "BOXD_PRODUCT_LICENSE"}
+        cfg = self.cfg()
+        missing = os.path.join(self.tmp.name, "nowhere")
         with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(assets.urllib.request, "urlopen", mock.Mock(side_effect=err)), \
+                mock.patch.object(assets, "BASE_URL", "file://" + missing), \
                 contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(InstallError) as cm:
+            with self.assertRaises(assets.DownloadFailed) as cm:
                 assets.resolve(cfg, None)
-        self.assertIn("sets BOXD_PRODUCT_LICENSE (the old download path)", str(cm.exception))
-        self.assertIn("assets_version", str(cm.exception))
+        self.assertNotIn(assets.download_id(KEY), str(cm.exception))
 
-    def test_the_license_selects_the_old_path(self):
+    def test_the_old_download_key_selects_the_old_path(self):
         with mock.patch.dict(os.environ, {"BOXD_PRODUCT_LICENSE": "ab" * 32}):
-            self.assertEqual(assets.zip_url(SHA),
+            self.assertEqual(assets.zip_url(self.cfg(), SHA),
                              f"{assets.LEGACY_BASE_URL}/{'ab' * 32}/boxd-assets-{SHA}.zip")
 
 if __name__ == "__main__":

@@ -55,11 +55,13 @@ class NoClusterToml(unittest.TestCase):
         doc = tomllib.loads(example)
         self.assertIn("license", doc)
         self.assertIn("telemetry", doc)
-        self.assertIn('# key_file = "license.key"', example)
+        self.assertIn('\nkey_file = "license.key"\n', example)
         self.assertIn("# enabled = false", example)
 
     def test_example_validates(self):
         shutil.copy(os.path.join(ROOT, "cluster.example.toml"), os.path.join(self.dir, "cluster.toml"))
+        with open(os.path.join(self.dir, "license.key"), "w") as fh:
+            fh.write("boxd-lic1_not-a-real-key\n")
         p = self.install("validate")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("cluster.toml OK", p.stdout)

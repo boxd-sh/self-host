@@ -41,7 +41,7 @@ happened, and wait for my OK before the next one.
 3. **Secrets never show up in chat, in a command line or in a log:** the
    state key, the license key, cloud keys, OAuth secrets. The state key lives
    in `~/.boxd-<CLUSTER>.env` (mode 600, docs/INSTALL.md "Your state key"), and every
-   command sources it first. A license key, if I have one, lives in
+   command sources it first. My license key lives in
    `license.key` (docs/REFERENCE.md "License key"). Check values by shape, e.g. 64 hex
    characters, without printing them.
 4. **Anything interactive is mine:** cloud logins, `providers edit`, saving
