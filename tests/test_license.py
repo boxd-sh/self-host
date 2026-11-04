@@ -465,7 +465,9 @@ class ApplyOrder(LicenseCluster):
              mock.patch.multiple(main.tf, init=calls.tf_init, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=calls.write_tfvars,
-                                 instance_types=mock.Mock(return_value=existing)), \
+                                 instance_types=mock.Mock(return_value=existing),
+                                 # The example's workers are on EBS.
+                                 data_volumes=mock.Mock(return_value=set(existing))), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
@@ -524,6 +526,19 @@ class ApplyOrder(LicenseCluster):
         self.assertLess(warn, names.index("tf_plan"))
         # The existing type goes to the tfvars.
         self.assertEqual(calls.write_tfvars.call_args[0][3], {AWS_WORKER: "m8i.8xlarge"})
+
+    def test_data_disk_switch_stops_before_the_plan(self):
+        """An EBS worker that exists, now set to instance store: refused
+        before terraform plans the EBS volume away."""
+        doc = without_type(aws_doc(), key_file=False)
+        w = next(n for n in doc["nodes"] if n["name"] == AWS_WORKER)
+        del w["data_disk_gb"]
+        w["machine_type"], w["data_disk"] = "m8id.metal-48xl", "instance-store"
+        calls = mock.Mock()
+        with self.assertRaises(InstallError) as e:
+            self.apply(doc, {AWS_WORKER: "m8i.8xlarge"}, calls)
+        self.assertIn("runs on an EBS data disk", str(e.exception))
+        self.assertNotIn("tf_plan", self.names(calls))
 
     def test_missing_key_file_stops_before_terraform(self):
         calls = mock.Mock()

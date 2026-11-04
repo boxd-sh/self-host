@@ -10,8 +10,16 @@
     mode: "0755"
   when: not (boxd_volume_manage | default(true) | bool)
 
+- name: Instance-store (local NVMe) volume
+  include_tasks: instance-store.yml
+  when:
+    - boxd_volume_manage | default(true) | bool
+    - boxd_volume_instance_store | default(false) | bool
+
 - name: Volume tasks
-  when: boxd_volume_manage | default(true) | bool
+  when:
+    - boxd_volume_manage | default(true) | bool
+    - not (boxd_volume_instance_store | default(false) | bool)
   block:
     - name: Detect attached block volume device
       shell: |

@@ -96,6 +96,20 @@ def state_instance_types(raw_state: dict) -> dict[str, str]:
                 out[name] = t.rsplit("/", 1)[-1]
     return out
 
+def data_volumes(cfg) -> set[str]:
+    """The nodes with an EBS data volume (aws_ebs_volume.data) in the
+    terraform state; empty before the first apply. Needs `init`."""
+    res = _tf(cfg, "state", "pull", capture=True, quiet=True)
+    return state_data_volumes(json.loads(res.stdout or "{}"))
+
+def state_data_volumes(raw_state: dict) -> set[str]:
+    """data_volumes from a raw terraform state (format version 4)."""
+    return {inst["index_key"]
+            for r in raw_state.get("resources", [])
+            if r.get("type") == "aws_ebs_volume" and r.get("name") == "data"
+            and r.get("mode") == "managed"
+            for inst in r.get("instances", []) if isinstance(inst.get("index_key"), str)}
+
 def init(cfg) -> None:
     _tf(cfg, "init", "-input=false", *clouds.get(cfg).backend_args(cfg))
 

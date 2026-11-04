@@ -97,6 +97,11 @@ roles        = ["worker"]
 internal_ip  = "10.70.1.10"              # in private_subnet_cidr
 machine_type = "m8i.4xlarge"             # default: m8i.4xlarge without a license key, m8i.8xlarge with one
 data_disk_gb = 500                       # required on workers: VM disks live here
+# Or the instance's local NVMe drives instead of EBS, on a type that has them
+# (m8id, c8id, r8id, i7ie...): faster, but wiped on stop. Read
+# docs/REFERENCE.md "Instance-store data disk" first.
+# machine_type = "m8id.metal-48xl"
+# data_disk    = "instance-store"
 
 # ================================================================= 3. OPTIONAL
 #
@@ -126,6 +131,10 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 # apply creates the bucket:
 #   [storage_engine]
 #   default_vm_storage = "bucket"        # default; "file" keeps new machines on disk
+# For lower latency, an S3 Express One Zone bucket in availability_zone
+# instead (one AZ holds the only copy: docs/REFERENCE.md "S3 Express storage
+# bucket"). Add under [aws], before the first apply with [storage_engine]:
+#   storage_bucket_type = "express"
 #
 # Buckets only reachable from inside the VPC (README "Buckets only inside
 # the VPC"). Add under [aws]:
@@ -194,6 +203,15 @@ nested_virt = false
 # Use it only on single-tenant installs. A [[nodes]] entry can set it per
 # worker. Needs boxd assets that include it; older ones ignore the key.
 # tc_filters = "full"
+# Kernel same-page merging on every worker: guests booted from the same
+# template share many identical pages, so a running machine costs the host
+# less memory than it touched. Costs some CPU (ksmd). See OPERATIONS.md,
+# "Capacity and machine sizes". Set by the installer, not passed to boxd.
+# ksm = true
+# Swap files on each worker's data disk, in GB, one file per entry (default
+# [64]). Swap is where idle guest pages park on an oversubscribed worker.
+# Grow it by appending (e.g. [64, 256]): an active swap file can't be resized.
+# swap_gb = [64]
 
 [proxy]
 ssh_port = 2222

@@ -1,0 +1,79 @@
+# Local NVMe instance store as the data disk: every instance-store drive in
+# one RAID 0 (or the lone drive), XFS labelled boxd-data. The drives come
+# back blank after a stop/start, so a boot-time unit rebuilds the array and
+# filesystem; fstab mounts by label with nofail so a blank boot still comes up.
+- name: Install mdadm
+  apt:
+    name: mdadm
+    state: present
+
+- name: Install instance-store setup script
+  template:
+    src: boxd-instance-store.sh.j2
+    dest: /usr/local/sbin/boxd-instance-store.sh
+    mode: "0755"
+
+- name: Install instance-store systemd service
+  copy:
+    content: |
+      [Unit]
+      Description=boxd data disk on local NVMe instance store
+      After=local-fs.target
+      Before=docker.service boxd-worker.service
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/boxd-instance-store.sh
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-instance-store.service
+    mode: "0644"
+
+- name: Enable + start instance-store service
+  systemd:
+    name: boxd-instance-store
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: boxd-worker drop-in directory
+  file:
+    path: /etc/systemd/system/boxd-worker.service.d
+    state: directory
+    mode: "0755"
+
+# Ordering alone isn't enough: if the array can't be built, boxd-worker
+# must not start and write machines to the bare mount point on the boot disk.
+- name: boxd-worker requires the instance-store data disk
+  copy:
+    dest: /etc/systemd/system/boxd-worker.service.d/instance-store.conf
+    content: |
+      [Unit]
+      Requires=boxd-instance-store.service
+      After=boxd-instance-store.service
+    mode: "0644"
+  register: instance_store_dropin
+
+- name: Reload systemd for the boxd-worker drop-in
+  systemd:
+    daemon_reload: true
+  when: instance_store_dropin.changed
+
+- name: Fail if the data disk is not mounted
+  command: "mountpoint -q {{ boxd_volume_mount }}"
+  changed_when: false
+
+- name: Mount data disk by label in fstab
+  mount:
+    path: "{{ boxd_volume_mount }}"
+    src: LABEL=boxd-data
+    fstype: xfs
+    opts: "noatime,nodiratime,discard,nofail,x-systemd.device-timeout=10s"
+    state: present
+
+- name: Enable weekly fstrim
+  systemd:
+    name: fstrim.timer
+    enabled: true
+    state: started
+  failed_when: false

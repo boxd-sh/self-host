@@ -144,6 +144,35 @@
   command: systemd-tmpfiles --create /etc/tmpfiles.d/boxd-thp.conf
   changed_when: false
 
+# [worker] ksm: KSM merges identical guest pages (same base image, same
+# runtimes) and, with use_zero_pages, pages a guest has zeroed. ksmd splits
+# the THPs it merges.
+- name: Configure KSM
+  copy:
+    dest: /etc/tmpfiles.d/boxd-ksm.conf
+    content: |
+      w /sys/kernel/mm/ksm/pages_to_scan - - - - 4000
+      w /sys/kernel/mm/ksm/sleep_millisecs - - - - 20
+      w /sys/kernel/mm/ksm/use_zero_pages - - - - 1
+      w /sys/kernel/mm/ksm/run - - - - 1
+    owner: root
+    group: root
+    mode: "0644"
+  when: boxd_worker_ksm | bool
+
+# Turning ksm off takes effect at the next boot; to stop it now, run
+# `echo 2 > /sys/kernel/mm/ksm/run` (it unmerges, so needs the memory back).
+- name: Drop the KSM config when ksm is off
+  file:
+    path: /etc/tmpfiles.d/boxd-ksm.conf
+    state: absent
+  when: not (boxd_worker_ksm | bool)
+
+- name: Apply KSM tmpfiles immediately
+  command: systemd-tmpfiles --create /etc/tmpfiles.d/boxd-ksm.conf
+  changed_when: false
+  when: boxd_worker_ksm | bool
+
 - name: Loosen perms on /dev/userfaultfd so boxd-vmm can open it
   copy:
     dest: /etc/tmpfiles.d/boxd-userfaultfd.conf

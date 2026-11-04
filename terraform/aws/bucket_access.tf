@@ -8,7 +8,8 @@ locals {
   vpc_only_buckets = var.bucket_access != "vpc" ? {} : merge(
     var.enable_backups ? { backups = aws_s3_bucket.backups[0] } : {},
     var.enable_snapshot_archive ? { snapshot_archive = aws_s3_bucket.snapshot_archive[0] } : {},
-    var.enable_storage_bucket ? { storage = aws_s3_bucket.storage[0] } : {},
+    # A directory bucket takes no such policy; its gateway endpoint is in storage_bucket.tf.
+    local.storage_standard ? { storage = aws_s3_bucket.storage[0] } : {},
   )
 }
 
