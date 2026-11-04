@@ -1,0 +1,43 @@
+#!/bin/bash
+# Mount the boxd data disk from the local NVMe instance store, creating it
+# (RAID 0 across every instance-store drive, XFS) when the drives are blank.
+set -euo pipefail
+
+mnt={{ boxd_volume_mount }}
+{% raw %}
+label=boxd-data
+
+mountpoint -q "$mnt" && exit 0
+mkdir -p "$mnt"
+
+if ! blkid -L "$label" >/dev/null 2>&1; then
+  mdadm --assemble --scan >/dev/null 2>&1 || true
+  udevadm settle
+fi
+
+if ! blkid -L "$label" >/dev/null 2>&1; then
+  mapfile -t disks < <(lsblk -dpno NAME,MODEL | awk '/Amazon EC2 NVMe Instance Storage/ {print $1}')
+  if (( ${#disks[@]} == 0 )); then
+    echo "boxd-instance-store: no instance-store NVMe drives on this instance" >&2
+    exit 1
+  fi
+  for d in "${disks[@]}"; do
+    if mdadm --examine "$d" >/dev/null 2>&1 || blkid "$d" >/dev/null 2>&1; then
+      echo "boxd-instance-store: $d carries an existing array or filesystem that" \
+           "did not assemble as $label; refusing to wipe it" >&2
+      exit 1
+    fi
+  done
+  if (( ${#disks[@]} == 1 )); then
+    dev=${disks[0]}
+  else
+    mdadm --create "/dev/md/$label" --run --level=0 --chunk=256 \
+      --raid-devices=${#disks[@]} --name="$label" "${disks[@]}"
+    dev=/dev/md/$label
+  fi
+  mkfs.xfs -f -L "$label" "$dev"
+  udevadm settle
+fi
+
+mount -o noatime,nodiratime,discard "LABEL=$label" "$mnt"
+{% endraw %}

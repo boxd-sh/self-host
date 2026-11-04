@@ -36,6 +36,16 @@ TEMPLATE_KEYS = {"sizes", "image", "tag"}
 # LLVM-compiled per-VM TC filters; "anti-spoof" attaches hand-assembled ones
 # (MAC/IP anti-spoof + infra-only :57073) and drops the tenant allow-list.
 TC_FILTERS = ("full", "anti-spoof")
+# [[nodes]].data_disk on AWS: the worker's data disk is its local NVMe
+# instance-store drives (RAID 0) instead of an EBS volume (data_disk_gb).
+# Wiped on stop, hibernate, terminate or host failure; a reboot keeps it.
+# On metal, data_disk is the device path instead (clouds/metal.py).
+INSTANCE_STORE = "instance-store"
+# EC2 families with instance-store NVMe: a "d" after the generation (m8id,
+# c7gd, r6idn, z1d) or the storage-optimized i/im/is families (i4i, i7ie,
+# im4gn). A warning only: a type this misses fails at apply, when the boot
+# unit finds no instance-store drive.
+_INSTANCE_STORE_FAMILY = re.compile(r"(?:i|im|is)\d.*|[a-z]+\d+[a-z]*d[a-z]*")
 # [network] (boxd `NetworkConfig`). mode "routed": no bridge and no VXLAN, one
 # pool for every worker and proxy, machines that keep their address when they
 # move (live migration); boxd's plans/2026-10-27-routed-network.md.
@@ -83,6 +93,11 @@ class Node:
         self.data_disk_gb: int | None = raw.get("data_disk_gb")
         self.boot_disk_gb: int | None = raw.get("boot_disk_gb")
 
+    @property
+    def instance_store(self) -> bool:
+        """The data disk is the instance's local NVMe (AWS), not EBS."""
+        return self.raw.get("data_disk") == INSTANCE_STORE
+
     def has(self, role: str) -> bool:
         return role in self.roles
 
@@ -125,7 +140,7 @@ STORAGE_ENGINE_SETTINGS = {
 }
 # The store: only in the providers config (it holds the bucket's key).
 STORAGE_STORE_KEYS = ("endpoint", "region", "bucket", "access_key", "secret_key",
-                      "conditional_put", "virtual_hosted_style")
+                      "conditional_put", "virtual_hosted_style", "s3_express")
 STORAGE_STORE_REQUIRED = ("region", "bucket", "access_key", "secret_key")
 CONDITIONAL_PUT = ("probe", "native", "head-then-put")
 # Set by the installer in worker.toml / bucket.toml, never by the operator.
@@ -165,6 +180,41 @@ def network_warnings(cfg) -> list[str]:
                 "address when they move, but a live migration (`boxd-ctl vm migrate --live`) "
                 "takes only machines on the storage engine, which this cluster does not run"]
     return []
+
+def storage_bucket_warnings(cfg) -> list[str]:
+    """An S3 Express storage bucket keeps the only copy of machines' disks,
+    snapshots and saved RAM in one availability zone."""
+    if cfg.cloud_name != "aws" or not clouds.CLOUDS["aws"].storage_express(cfg.doc):
+        return []
+    out = ['[aws] storage_bucket_type = "express": the storage bucket is an S3 Express One '
+           f"Zone directory bucket in {cfg.cloud['availability_zone']} only. It holds the only "
+           "durable copy of machines' disks, snapshots and hibernated memory, and losing that "
+           "availability zone loses them (docs/REFERENCE.md, \"S3 Express storage bucket\")"]
+    if cfg.cloud.get("bucket_access") == "vpc":
+        out.append('[aws] bucket_access = "vpc" doesn\'t cover the S3 Express storage bucket: a '
+                   "directory bucket takes no VPC-endpoint policy, so its access key alone "
+                   "decides who reaches it")
+    return out
+
+def data_disk_warnings(cfg) -> list[str]:
+    """Instance-store workers: what a stop costs, every validate and apply.
+    The storage engine can't yet bring back a worker whose data disk was
+    wiped (its machines' volumes stay open on it), so even with
+    [storage_engine] the warning stands."""
+    out = []
+    for n in cfg.nodes_with("worker"):
+        if not n.instance_store:
+            continue
+        family = (n.machine_type or "").split(".")[0]
+        if family and not _INSTANCE_STORE_FAMILY.fullmatch(family):
+            out.append(f"{n.name}: {n.machine_type} doesn't look like a type with "
+                       "instance-store NVMe; apply fails on it if it has none")
+        out.append(f"{n.name}: its data disk is instance store, which is wiped on stop, "
+                   "hibernate, terminate or host failure (a reboot keeps it). Every machine, "
+                   "checkpoint and snapshot replica on it is lost then, on the storage "
+                   "engine too: never stop this instance (docs/REFERENCE.md, "
+                   "\"Instance-store data disk\")")
+    return out
 
 def _deep_merge(base: dict, over: dict) -> dict:
     out = dict(base)
@@ -387,11 +437,26 @@ def _validate(doc: dict) -> None:
         is_worker = any(r.partition(":")[0] == "worker" for r in n.get("roles", []))
         # Given hosts (no terraform): the adapter checks their disks.
         if mod.TF_DIR is not None:
-            if is_worker and not n.get("data_disk_gb"):
+            disk = n.get("data_disk")
+            if disk is not None and disk != INSTANCE_STORE:
+                errs.append(f'{nm}: data_disk must be "{INSTANCE_STORE}" (local NVMe), got '
+                            f"{disk!r}; an EBS data disk is data_disk_gb")
+            elif disk == INSTANCE_STORE:
+                if cloud != "aws":
+                    errs.append(f'{nm}: data_disk = "{INSTANCE_STORE}" is only supported on AWS')
+                if n.get("data_disk_gb"):
+                    errs.append(f"{nm}: set either data_disk_gb (EBS) or data_disk = "
+                                f'"{INSTANCE_STORE}" (local NVMe), not both')
+                if is_worker and not n.get("machine_type"):
+                    errs.append(f'{nm}: data_disk = "{INSTANCE_STORE}" needs a machine_type '
+                                "with instance-store NVMe (e.g. m8id.metal-48xl); the default "
+                                "type has none")
+            if is_worker and not n.get("data_disk_gb") and disk is None:
                 errs.append(f"{nm}: worker nodes must set data_disk_gb (VM data lives "
-                            "on the data disk; the 50G boot disk cannot hold it)")
-            if not is_worker and n.get("data_disk_gb"):
-                errs.append(f"{nm}: data_disk_gb is only valid on worker nodes")
+                            "on the data disk; the 50G boot disk cannot hold it), or "
+                            f'data_disk = "{INSTANCE_STORE}" on AWS')
+            if not is_worker and (n.get("data_disk_gb") or disk is not None):
+                errs.append(f"{nm}: data_disk_gb and data_disk are only valid on worker nodes")
         if "machine_type" in n and not (isinstance(n["machine_type"], str)
                                         and n["machine_type"]):
             errs.append(f"{nm}: machine_type must be a quoted string, e.g. "
@@ -448,6 +513,15 @@ def _validate(doc: dict) -> None:
     tcf = doc.get("worker", {}).get("tc_filters")
     if tcf is not None and tcf not in TC_FILTERS:
         errs.append(f"[worker].tc_filters must be one of {', '.join(TC_FILTERS)}, got {tcf!r}")
+    wk = doc.get("worker", {})
+    if "ksm" in wk and not isinstance(wk["ksm"], bool):
+        errs.append("[worker].ksm must be true or false")
+    if "swap_gb" in wk:
+        swap = wk["swap_gb"]
+        if not (isinstance(swap, list) and swap
+                and all(isinstance(gb, int) and not isinstance(gb, bool) and gb > 0 for gb in swap)):
+            errs.append("[worker].swap_gb must be a non-empty list of sizes in GB, one swap "
+                        "file each (e.g. [64, 256])")
 
     if "acme" not in doc:
         errs.append('[acme] required: contact_email (public CAs), or ca = "local"')
@@ -781,9 +855,9 @@ def validate_storage_store(store: dict) -> list[str]:
             if v not in CONDITIONAL_PUT:
                 errs.append(f"[storage_engine].conditional_put must be one of "
                             f"{', '.join(CONDITIONAL_PUT)}, got {v!r}")
-        elif k == "virtual_hosted_style":
+        elif k in ("virtual_hosted_style", "s3_express"):
             if not isinstance(v, bool):
-                errs.append("[storage_engine].virtual_hosted_style must be true or false")
+                errs.append(f"[storage_engine].{k} must be true or false")
         elif not (isinstance(v, str) and v):
             errs.append(f'[storage_engine].{k} must be a non-empty quoted string, e.g. {k} = "…"')
     ep = store.get("endpoint")

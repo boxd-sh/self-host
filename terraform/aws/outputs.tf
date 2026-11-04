@@ -26,13 +26,13 @@ output "snapshot_archive" {
 # bucket's open write, which is how apply tells a bad key.
 output "storage_bucket" {
   sensitive = true
-  value = var.enable_storage_bucket ? {
+  value = var.enable_storage_bucket ? merge({
     kind       = "s3"
-    bucket     = aws_s3_bucket.storage[0].bucket
+    bucket     = local.storage_bucket_name
     region     = var.region
     access_key = aws_iam_access_key.storage[0].id
     secret_key = aws_iam_access_key.storage[0].secret
-  } : null
+  }, local.storage_express ? { s3_express = true } : {}) : null
 }
 
 output "nodes" {

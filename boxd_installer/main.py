@@ -44,7 +44,8 @@ def cmd_validate(args) -> int:
     if errs := telemetry.errors(cfg):
         raise InstallError("; ".join(errs))
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
-                + config.network_warnings(cfg))
+                + config.network_warnings(cfg) + config.data_disk_warnings(cfg)
+                + config.storage_bucket_warnings(cfg))
     for warning in warnings:
         log(f"warning: {warning}")
     print("cluster.toml OK")
@@ -100,6 +101,9 @@ def _apply(cfg, args) -> int:
         tf.init(cfg)
         # A worker that exists keeps its type: the license never resizes one.
         existing = tf.instance_types(cfg)
+        # A worker that exists keeps its kind of data disk (EBS or instance store).
+        if cfg.cloud_name == "aws" and any(n.name in existing for n in cfg.nodes_with("worker")):
+            clouds.CLOUDS["aws"].check_data_disk_switch(cfg, set(existing), tf.data_volumes(cfg))
         for warning in license.free_tier_warnings(cfg, existing):
             log(f"warning: {warning}")
         tfvars = tf.write_tfvars(cfg, state, args.out_dir, existing)
@@ -116,7 +120,8 @@ def _apply(cfg, args) -> int:
     if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
                                       if cfg.table(t)}):
         log(f"warning: {inert}")
-    for warning in config.network_warnings(cfg):
+    for warning in (config.network_warnings(cfg) + config.data_disk_warnings(cfg)
+                    + config.storage_bucket_warnings(cfg)):
         log(f"warning: {warning}")
     composio.sync_auth_configs(cfg, state, assets_root)
     ensure_egress_ca(cfg, state)

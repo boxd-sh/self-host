@@ -282,7 +282,7 @@ def template_storage(cfg) -> str:
 
 # Resources a failed destroy may leave behind on purpose: buckets with
 # objects in them (force_destroy = false).
-KEPT_BUCKET_TYPES = ("aws_s3_bucket", "google_storage_bucket")
+KEPT_BUCKET_TYPES = ("aws_s3_bucket", "aws_s3_directory_bucket", "google_storage_bucket")
 
 def kept_buckets(state_list: list[str]) -> list[str] | None:
     """The bucket addresses left in terraform state after a failed destroy,

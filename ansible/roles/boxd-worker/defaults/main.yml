@@ -1,1 +1,2 @@
 boxd_worker_swapfiles: []
+boxd_worker_ksm: false

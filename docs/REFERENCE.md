@@ -18,7 +18,8 @@ node). Roles can share a node.
   otherwise). Renaming a node later replaces its instance.
 - **Machine types** have defaults per role. `machine_type` and `boot_disk_gb`
   are per-node overrides. Workers must set `data_disk_gb`, because VM disks
-  live there.
+  live there. On AWS a worker can use its local NVMe drives instead:
+  `data_disk = "instance-store"` ([below](#instance-store-data-disk-aws)).
 - **The network interface** boxd uses on the private network is, on each
   node, the device that holds its `internal_ip`, read from the host at every
   apply: instance types name it differently (AWS: `ens5`, `enp39s0` on m8i;
@@ -31,6 +32,52 @@ node). Roles can share a node.
   nameserver. Resolvers that try the missing `ns2` fall back to `ns1`, so
   lookups work, just slower now and then. A boxd release will fix this. For
   production, run two.
+
+### Instance-store data disk (AWS)
+
+On an EC2 type with instance-store NVMe (a `d` after the generation, such as
+`m8id`, `c8id` and `r8id`, or the storage-optimized `i` families), a worker
+can keep its data on those local drives instead of an EBS volume:
+
+```toml
+[[nodes]]
+name         = "mycluster-worker-0"
+roles        = ["worker"]
+internal_ip  = "10.70.1.10"
+machine_type = "m8id.metal-48xl"
+data_disk    = "instance-store"   # RAID 0 over every local NVMe drive; no EBS volume
+```
+
+Local NVMe reads take about 0.05–0.1 ms against about 1 ms on gp3, for
+everything a worker keeps on its data disk: machines' disks, the memory files
+a wake maps, and swap.
+
+**The trade-off is durability.** Instance store is wiped on stop, hibernate,
+terminate or host failure; a reboot keeps it. Every machine disk, memory
+file, checkpoint, snapshot replica and swap file on that worker is lost then.
+`validate` and `apply` warn about every instance-store worker. Bucket storage
+(`[storage_engine]`) keeps the frozen layers of machines' disks in the bucket,
+but boxd can't yet bring back the machines of a worker whose disk was wiped:
+treat a wipe as losing them there too. So:
+
+- Never stop or hibernate the instance from EC2. Reboot instead.
+- Run more than one worker, so snapshots have replicas elsewhere, and turn on
+  [VM backups](#vm-backups).
+- If a worker's instance store is wiped anyway, contact boxd before you
+  apply or start machines on it.
+
+**What `apply` does.** No EBS data volume. The worker gets
+`boxd-instance-store.service`, which runs at every boot before `boxd-worker`:
+it assembles the RAID 0 array (`/dev/md/boxd-data`; a lone drive is used as
+it is), or, when the drives are blank, creates it and an XFS file system
+labelled `boxd-data`, then mounts it at `/mnt/boxd-data`. It never formats a
+drive that holds another array or file system. `boxd-worker` requires the
+service, so it never starts on the bare mount point if the disk isn't there.
+
+**A worker keeps its kind of data disk.** `apply` refuses to switch a worker
+that exists between `data_disk_gb` and `data_disk = "instance-store"`: either
+way its machines would be left on the old disk. Move the machines off, remove
+the worker and apply, then add it back under a new name with the new setting.
 
 ### Machine sizes (`[templates]`)
 
@@ -1222,6 +1269,38 @@ multipart uploads. Leave `conditional_put` out unless your store needs it:
 with `native` or `head-then-put`, opening the bucket writes nothing, so `apply`
 can't tell a wrong key. A providers store is refused while `apply` makes the
 bucket itself. Decide which bucket before the first `apply` with the engine.
+
+#### S3 Express storage bucket
+
+On AWS the installer can make the storage bucket an S3 Express One Zone
+directory bucket in the cluster's availability zone, for lower request
+latency than a regional bucket:
+
+```toml
+[aws]
+storage_bucket_type = "express"   # "standard" (the default) or "express"
+```
+
+Terraform then makes `<cluster>-storage-<account>--<az-id>--x-s3` (the AZ id
+of `availability_zone`, such as `euc1-az2`), an IAM user whose key may only
+open sessions on it (`s3express:CreateSession`), the abort-incomplete-multipart
+lifecycle rule, and an `s3express` gateway endpoint so workers reach it
+through the VPC. Workers' `bucket.toml` gets `s3_express = true`, and boxd
+talks to the zonal endpoint with session credentials. Express is offered in
+some availability zones only: check that yours has it before the first apply.
+
+**The trade-off is durability.** A directory bucket keeps its data in one
+availability zone. The storage bucket holds the only durable copy of
+machines' disks, snapshots and hibernated memory, so losing that zone loses
+them. `validate` and `apply` warn. A directory bucket takes no VPC-endpoint
+bucket policy, so `bucket_access = "vpc"` doesn't cover it. Storage also
+costs more per GB than a standard bucket.
+
+Like the bucket itself, the choice is one-way: once the catalog is on,
+`apply` refuses a change of `storage_bucket_type`, because it gives the
+workers another bucket. Your own directory bucket (`auto_storage_bucket =
+false`) goes in `providers edit` with `s3_express = true`, a `region`, and no
+`endpoint`.
 
 **One way.** Once the storage catalog is on, machines can live in the
 bucket. From then on `apply` refuses:

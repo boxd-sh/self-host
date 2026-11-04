@@ -210,7 +210,7 @@ class Renderer:
             store["prefix"] = self.state.storage_prefix()
             store["access_key_id"] = own["access_key"]
             store["secret_access_key"] = own["secret_key"]
-            for k in ("conditional_put", "virtual_hosted_style"):
+            for k in ("conditional_put", "virtual_hosted_style", "s3_express"):
                 if k in own:
                     store[k] = own[k]
             if own.get("conditional_put") in ("native", "head-then-put"):
@@ -235,6 +235,9 @@ class Renderer:
         store.update(region=tfs["region"], bucket=tfs["bucket"],
                      prefix=self.state.storage_prefix(),
                      access_key_id=tfs["access_key"], secret_access_key=tfs["secret_key"])
+        if tfs.get("s3_express"):
+            # A directory bucket: boxd talks to its zonal endpoint with session credentials.
+            store["s3_express"] = True
         return store
 
     def storage_identity(self) -> dict:
@@ -467,6 +470,9 @@ class Renderer:
                 doc["network"]["guest_mtu"] = mtu
         doc["paths"] = {"run_dir": "/run/boxd", "data_dir": "/mnt/boxd-data", "log_dir": "/var/log/boxd"}
         worker = dict(self.cfg.table("worker"))
+        # The installer's own: the worker role sets these up on the host.
+        worker.pop("ksm", None)
+        worker.pop("swap_gb", None)
         for k in ("warm_slots", "nested_virt", "tc_filters"):
             if k in node.raw:
                 worker[k] = node.raw[k]
@@ -609,10 +615,14 @@ class Renderer:
                 "",
                 "# Swap = the capacity tier idle guest pages park in (workers run",
                 "# deliberately oversubscribed). On the data disk — the 50G boot disk",
-                "# cannot hold it.",
+                "# cannot hold it. Files are only ever added: [worker].swap_gb grows",
+                "# by appending, since an active swap file can't be resized.",
                 "boxd_worker_swapfiles:",
-                "  - { path: /mnt/boxd-data/swap0, size: 64G }",
             ]
+            for i, gb in enumerate(cfg.table("worker").get("swap_gb", [64])):
+                lines.append(f"  - {{ path: /mnt/boxd-data/swap{i}, size: {gb}G }}")
+            if cfg.table("worker").get("ksm"):
+                lines.append("boxd_worker_ksm: true")
         return "\n".join(lines) + "\n"
 
     def downloads(self) -> dict[str, str]:

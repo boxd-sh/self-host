@@ -239,6 +239,20 @@ boxd-ctl vm auto-hibernate <vm-id> 0            # this VM never hibernates
 The org setting applies to machines created afterwards; existing machines
 keep theirs.
 
+**KSM.** `[worker] ksm = true` turns on kernel same-page merging on every
+worker (`/etc/tmpfiles.d/boxd-ksm.conf`: 4000 pages per 20 ms scan, zero pages
+merged too). Machines booted from the same template share many identical
+pages, so a running machine costs the host less than it touched. ksmd splits
+the transparent huge pages it merges. Watch it on a worker with:
+
+```sh
+grep -H . /sys/kernel/mm/ksm/{pages_sharing,pages_shared,ksm_zero_pages,general_profit,full_scans}
+```
+
+Setting `ksm = false` and applying removes the config, which takes effect at
+the next boot. To stop merging now, run `echo 2 > /sys/kernel/mm/ksm/run` on
+the worker: it unmerges every page, so the worker needs that memory free.
+
 ## Machines
 
 ```sh
@@ -758,6 +772,12 @@ Workers keep machine disks and their swap file on the data disk
   workers.
 - Under sustained swap pressure, a machine can freeze and fail to hibernate
   ("Vcpu is in unexpected state"). Stop and start it to recover it.
+- **Full swap** kills machines: each machine's cgroup caps it at its size,
+  and one that reaches the cap with no swap left is OOM-killed (`Memory cgroup
+  out of memory: Killed process ... (boxd-vmm)` in `journalctl -k`). Add a
+  swap file by appending a size to `[worker] swap_gb` (default `[64]`, e.g.
+  `[64, 256]`) and applying: the worker role creates and turns on only the new
+  files, and existing ones can't be resized.
 
 ### `boxd-ctl status` shows no leader
 

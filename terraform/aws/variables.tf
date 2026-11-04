@@ -72,6 +72,13 @@ variable "enable_storage_bucket" {
   default = false
 }
 
+# [aws] storage_bucket_type = "express": the storage bucket is an S3 Express
+# One Zone directory bucket in availability_zone (storage_bucket.tf).
+variable "storage_bucket_express" {
+  type    = bool
+  default = false
+}
+
 # "vpc": the installer-created buckets' data only through the VPC's S3
 # gateway endpoint (bucket_access.tf). "anywhere": IAM alone decides.
 variable "bucket_access" {

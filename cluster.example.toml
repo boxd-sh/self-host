@@ -181,6 +181,15 @@ nested_virt = false
 # Use it only on single-tenant installs. A [[nodes]] entry can set it per
 # worker. Needs boxd assets that include it; older ones ignore the key.
 # tc_filters = "full"
+# Kernel same-page merging on every worker: guests booted from the same
+# template share many identical pages, so a running machine costs the host
+# less memory than it touched. Costs some CPU (ksmd). See OPERATIONS.md,
+# "Capacity and machine sizes". Set by the installer, not passed to boxd.
+# ksm = true
+# Swap files on each worker's data disk, in GB, one file per entry (default
+# [64]). Swap is where idle guest pages park on an oversubscribed worker.
+# Grow it by appending (e.g. [64, 256]): an active swap file can't be resized.
+# swap_gb = [64]
 
 [proxy]
 ssh_port = 2222

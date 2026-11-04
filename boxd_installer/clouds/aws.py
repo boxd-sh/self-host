@@ -84,6 +84,15 @@ def _auto_storage(doc: dict) -> bool:
     return isinstance(doc.get("storage_engine"), dict) and \
         doc["aws"].get("auto_storage_bucket", True) is not False
 
+# [aws] storage_bucket_type: "standard" (an S3 general purpose bucket in the
+# region) or "express" (an S3 Express One Zone directory bucket in the
+# cluster's availability zone: lower latency, but one AZ holds the only copy).
+STORAGE_BUCKET_TYPES = ("standard", "express")
+
+def storage_express(doc: dict) -> bool:
+    """The installer's storage bucket is an S3 Express directory bucket."""
+    return _auto_storage(doc) and doc["aws"].get("storage_bucket_type") == "express"
+
 def validate(doc: dict, errs: list[str]) -> None:
     aws = doc["aws"]
     ingress = _validate_ingress(doc, errs)
@@ -97,6 +106,15 @@ def validate(doc: dict, errs: list[str]) -> None:
                     "archive or storage bucket there are none")
     if "auto_snapshot_archive" in aws and not isinstance(aws["auto_snapshot_archive"], bool):
         errs.append("[aws].auto_snapshot_archive must be true or false")
+    if "storage_bucket_type" in aws:
+        kind = aws["storage_bucket_type"]
+        if kind not in STORAGE_BUCKET_TYPES:
+            errs.append(f"[aws].storage_bucket_type must be one of "
+                        f"{', '.join(STORAGE_BUCKET_TYPES)}, got {kind!r}")
+        elif kind == "express" and not _auto_storage(doc):
+            errs.append('[aws].storage_bucket_type = "express" is for the bucket the installer '
+                        "makes: it needs [storage_engine], and auto_storage_bucket not false "
+                        "(your own directory bucket goes in `providers edit` with s3_express = true)")
     max_name = BUCKET_NAME_MAX - len(f"-backups-{'0' * ACCOUNT_ID_LEN}-{aws['region']}")
     if len(doc["cluster"]["name"]) > max_name:
         errs.append(f"[cluster].name must be <= {max_name} chars in {aws['region']} (the "
@@ -146,6 +164,7 @@ def tfvars(cfg, state, nodes: list[dict]) -> dict:
         "bucket_access": cfg.cloud.get("bucket_access", "anywhere"),
         "enable_snapshot_archive": _auto_archive(cfg.doc),
         "enable_storage_bucket": _auto_storage(cfg.doc),
+        "storage_bucket_express": storage_express(cfg.doc),
         "nodes": nodes,
     }
 
@@ -215,12 +234,39 @@ def ssh_target(node, tf_out: dict) -> str:
         raise InstallError(f"{node.name}: no instance_id in terraform outputs — run `apply`")
     return iid
 
+def check_data_disk_switch(cfg, instances: set[str], ebs: set[str]) -> None:
+    """Refuse to move a worker that exists between an EBS data disk and
+    instance store, before terraform plans it: to instance store, terraform
+    would destroy the EBS volume the worker's machines live on; to EBS, the
+    worker would format a new volume and leave its machines behind on the
+    instance store. `instances` and `ebs` are the nodes with an instance and
+    with an EBS data volume in the terraform state."""
+    bad = []
+    for n in cfg.nodes_with("worker"):
+        if n.name not in instances:
+            continue
+        if n.instance_store and n.name in ebs:
+            bad.append(f"{n.name} runs on an EBS data disk, and cluster.toml now says "
+                       'data_disk = "instance-store"')
+        elif not n.instance_store and n.name not in ebs:
+            bad.append(f"{n.name} runs on instance store, and cluster.toml now gives it an "
+                       "EBS data disk (data_disk_gb)")
+    if bad:
+        raise InstallError(
+            "; ".join(bad) + ". A worker's data disk holds its machines, so it can't change "
+            "under them: put the worker's data disk setting back, or move its machines off, "
+            "remove the worker from cluster.toml and apply, then add it back with the new "
+            "setting under a new name")
+
 def host_vars(node, tf_out: dict) -> dict:
     """ansible_host = instance id (the SSM target). The data disk is pinned
     by EBS volume serial: instance-store families expose extra NVMe disks
-    that boxd-volume's first-non-root-disk detection would pick instead."""
+    that boxd-volume's first-non-root-disk detection would pick instead.
+    With data_disk = "instance-store" those NVMe disks are the data disk."""
     hv = {"ansible_host": ssh_target(node, tf_out)}
     vol = tf_out["nodes"][node.name].get("data_volume_id")
-    if vol:
+    if node.instance_store:
+        hv["boxd_volume_instance_store"] = True
+    elif vol:
         hv["boxd_volume_device"] = "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_" + vol.replace("-", "")
     return hv
