@@ -480,6 +480,59 @@ def init_cluster_id(cfg) -> None:
         return
     raise InstallError(f"boxd-ctl license init-cluster-id failed: {err[-2000:]}")
 
+# The cluster_config switch for machine specs: "on", "off", or unset (off).
+# boxd refuses a create, restore or fork with a spec while it isn't "on",
+# because a node on an older release skips their Raft entries for good.
+MACHINE_SPECS = "machine_specs"
+
+def pause_machine_specs(cfg) -> None:
+    """Before the converge of a new bundle: when machine specs are on, unset
+    the switch (off), so no new node proposes spec entries an old one would
+    miss. Unset, not "off": "off" is the operator's own choice, which
+    turn_on_machine_specs keeps. Anything but a clean "on" (a fresh cluster,
+    a release without the switch) leaves it alone."""
+    res = ctl(cfg, f"cluster-config get {MACHINE_SPECS}", check=False, quiet=True)
+    if res.returncode != 0 or res.stdout.strip() != "on":
+        return
+    res = ctl(cfg, f"cluster-config unset {MACHINE_SPECS}", check=False)
+    if res.returncode != 0:
+        err = ((res.stderr or "") + (res.stdout or "")).strip()
+        raise InstallError(f"boxd-ctl cluster-config unset {MACHINE_SPECS} failed: "
+                           f"{err[-2000:]}")
+    log("machine specs off for the upgrade (creates, restores and forks with a spec are "
+        "refused until every node runs the new bundle)")
+
+def turn_on_machine_specs(cfg) -> None:
+    """After the converge, when every node runs the new bundle: turn machine
+    specs on when the switch is unset (a cluster that never had them, or one
+    pause_machine_specs paused). "off" stays off: an operator set it. A
+    bundle from before machine specs warns instead of failing the apply."""
+    res = ctl(cfg, f"cluster-config get {MACHINE_SPECS}", check=False, quiet=True)
+    err = ((res.stderr or "") + (res.stdout or "")).strip()
+    value = res.stdout.strip() if res.returncode == 0 else None
+    if value == "on":
+        return
+    if value == "off":
+        log("machine specs: off, as an operator set them; left off (`boxd-ctl "
+            f"cluster-config set {MACHINE_SPECS} on` on a control node turns them on)")
+        return
+    if value is None and f"{MACHINE_SPECS} is unset" not in err:
+        if "unrecognized subcommand" in err:
+            log("warning: this assets bundle's boxd-ctl has no `cluster-config`; machine "
+                "specs stay off")
+            return
+        raise InstallError(f"boxd-ctl cluster-config get {MACHINE_SPECS} failed: {err[-2000:]}")
+    res = ctl(cfg, f"cluster-config set {MACHINE_SPECS} on", check=False)
+    if res.returncode == 0:
+        log("machine specs -> on")
+        return
+    err = ((res.stderr or "") + (res.stdout or "")).strip()
+    if "can't be written" in err:
+        log("warning: this assets bundle has no machine specs; creates, restores and forks "
+            "with a spec stay refused")
+        return
+    raise InstallError(f"boxd-ctl cluster-config set {MACHINE_SPECS} on failed: {err[-2000:]}")
+
 def install_license(cfg, key_path: str) -> None:
     """`boxd-ctl license install` with the key file on stdin (never on the
     command line), on one control node, on every apply. Control verifies the

@@ -475,6 +475,8 @@ class ApplyOrder(LicenseCluster):
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
                                  init_cluster_id=calls.init_cluster_id,
+                                 pause_machine_specs=calls.pause_machine_specs,
+                                 turn_on_machine_specs=calls.turn_on_machine_specs,
                                  install_license=calls.install_license,
                                  set_telemetry=calls.set_telemetry,
                                  seed_templates=calls.seed_templates,

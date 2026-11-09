@@ -136,6 +136,9 @@ def _apply(cfg, args) -> int:
     if not clouds.provisions(cfg):
         for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
             log(f"warning: {warning}")
+    # Last before the converge, so a check that refuses the apply leaves them on.
+    if bundle_changes(state, cfg):
+        ansible.pause_machine_specs(cfg)
     ansible.converge(cfg, args.out_dir, assets_root,
                      assets.host_kernel_release(assets_root),
                      control_carry.carry_dir(state))
@@ -165,6 +168,8 @@ def _apply(cfg, args) -> int:
     # cluster ID can be made (once; a no-op after). Before the key: a bound
     # key needs it.
     ansible.init_cluster_id(cfg)
+    # For the same reason: an older node would skip their entries for good.
+    ansible.turn_on_machine_specs(cfg)
     # Before the templates, so the key is in place before any machine is made.
     if key:
         ansible.install_license(cfg, key)
@@ -216,6 +221,12 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
             "is one without it (its manifest lists no \"bucket\" feature). Bucket storage "
             "comes with a license key that includes it: ask your boxd contact, or remove "
             "[storage_engine]")
+
+def bundle_changes(state, cfg) -> bool:
+    """Whether this apply installs another bundle than the last successful
+    one. The record is written only at the end of an apply, so an upgrade
+    that stopped half-way still counts as a change on the re-run."""
+    return (state.data.get("applied_assets") or {}).get("sha") != cfg.assets_version
 
 def check_network_mode(cfg, state) -> None:
     """Refuse to switch an existing cluster's [network] mode (bridge <->

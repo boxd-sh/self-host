@@ -192,6 +192,8 @@ class ApplyPassesTheSetting(Isolated):
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
                                  init_cluster_id=mock.DEFAULT, install_license=mock.DEFAULT,
+                                 pause_machine_specs=mock.DEFAULT,
+                                 turn_on_machine_specs=mock.DEFAULT,
                                  set_telemetry=calls.set_telemetry,
                                  seed_templates=mock.DEFAULT, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
@@ -225,6 +227,8 @@ class ApplyPassesTheSetting(Isolated):
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
                                  init_cluster_id=mock.DEFAULT, install_license=mock.DEFAULT,
+                                 pause_machine_specs=mock.DEFAULT,
+                                 turn_on_machine_specs=mock.DEFAULT,
                                  set_telemetry=calls.set_telemetry,
                                  seed_templates=mock.DEFAULT, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \

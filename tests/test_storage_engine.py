@@ -650,6 +650,8 @@ class ApplyOrder(unittest.TestCase):
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
                                  init_cluster_id=calls.init_cluster_id,
+                                 pause_machine_specs=mock.DEFAULT,
+                                 turn_on_machine_specs=mock.DEFAULT,
                                  install_license=calls.install_license,
                                  set_telemetry=mock.DEFAULT,
                                  seed_templates=calls.seed_templates, configure_orgs=mock.DEFAULT,
