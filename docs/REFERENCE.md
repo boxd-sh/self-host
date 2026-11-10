@@ -851,6 +851,21 @@ the console, the CLI your users download, and VM templates. Services restart
 only where something actually changed, and `site.yml` converges control nodes
 last with `serial: 1`, so replicas upgrade before the leader.
 
+Machine specs (a machine created, restored or forked with a spec, and changes
+to a machine's spec) need every node on a release that has them: a node on an
+older release would miss what they record, for good. boxd keeps them behind a
+switch, and `apply` handles it. Before it converges a new release, it turns
+the switch off if it was on; once every node runs the new release, it turns
+it on. In between, they are refused with *"machine specs aren't turned on on
+this cluster yet"*. Machines that have a
+spec keep running, and machines without one aren't affected. An `apply` that
+installs the release the cluster already runs leaves the switch on.
+
+To keep machine specs off, run `sudo boxd-ctl cluster-config set
+machine_specs off` on a control node. `apply` leaves an `off` as it is and
+says so; `sudo boxd-ctl cluster-config set machine_specs on` turns them back
+on.
+
 Treat a downgrade as a question for your boxd contact rather than an
 assumption: re-applying an older release rolls the binaries back, but a
 release that has already migrated on-disk or control-plane state may not
@@ -1439,6 +1454,15 @@ When the cluster is gone for good, also:
   - *"This cluster isn't set up yet"*: `bootstrap_admin` waits for its
     person's first sign-in. When it's their email but the provider marks it
     unverified, or the account is an Entra ID guest, the message says so.
+- **`machine specs aren't turned on on this cluster yet`** when a machine is
+  created, restored or forked with a spec: the cluster's `machine_specs`
+  switch isn't on ([Upgrades](#upgrades-and-rollback)). Older installers
+  never turned it on. Update the installer and apply, or turn it on yourself
+  once every node runs the release: `sudo boxd-ctl cluster-config set
+  machine_specs on` on a control node, then `sudo boxd-ctl cluster-config get
+  machine_specs` prints `on`. While an `apply` upgrades boxd, the refusal is
+  expected until the nodes are done. If `apply` printed `machine specs: off,
+  as an operator set them`, someone turned them off on purpose.
 - **`download failed (404)`** for a release: `assets_version` names a version
   boxd hasn't published (a typo in a pinned sha, or a channel name boxd
   doesn't publish). `download failed (403)` means the release bucket refused the
