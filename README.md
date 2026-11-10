@@ -2,12 +2,17 @@
 
 # boxd self-host
 
-**Run a complete [boxd](https://boxd.sh) cluster in your own Google Cloud
-project or AWS account, or on servers you already run.** You get microVMs
-that boot in 4 ms and can be forked and snapshotted, each with its own SSH
-and HTTPS, along with the console, DNS and automations. Everything is set by
-one config file and installed by one command. The only thing to install on
-your machine is Docker.
+**Fast, isolated machines for AI agents and dev teams, self-hosted in your own
+cloud.** Use them as agent sandboxes, dev environments or servers. Each one
+has its own SSH and HTTPS, and you can fork and snapshot it. Your team gets the
+[boxd](https://boxd.sh) console, CLI and API, running in your Google Cloud
+project, your AWS account or on servers you already run.
+
+**This repository is the installer.** It sets up a complete boxd cluster from
+one config file with one command, and the only thing it needs on your machine
+is Docker. The boxd software itself comes as signed release binaries, which the
+installer downloads and checks before it installs them. The installer is open
+source; the binaries have their own license (see [License](#license)).
 
 [Install on GCP](docs/INSTALL.md#install-on-gcp)
 | [Install on AWS](docs/INSTALL.md#install-on-aws)
@@ -58,8 +63,8 @@ anything.
 
 ## What you get
 
-- **Fast microVMs.** They boot in 4 ms, can be forked and snapshotted, and come
-  in the [sizes you pick](docs/REFERENCE.md#machine-sizes-templates).
+- **Fast microVMs that can be forked and snapshotted.** They come in the
+  [sizes you pick](docs/REFERENCE.md#machine-sizes-templates).
 - **Every VM on the network.** Each one is reachable over HTTPS at
   `https://<name>.<zone>` and over SSH. You can also give it custom domains
   and raw TCP or UDP ports.
