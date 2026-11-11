@@ -2,18 +2,10 @@
   systemd:
     daemon_reload: true
 
-# Re-runs the oneshot's ExecStart: one atomic nft batch replaces the tables,
-# so guests are never unfiltered (the unit has no ExecStop). Before the
-# worker's restart (handlers run in this order): the worker's ExecStartPre
-# checks the ruleset it is about to run under.
-- name: reapply guest firewall
-  systemd:
-    name: boxd-guest-fw
-    state: restarted
-    daemon_reload: true
-
-# After the firewall (handlers run in this order): the relay's ExecStartPre checks the firewall's
-# relay chain. Only when its binary or unit changed: a restart cuts its open connections.
+# The guest firewall is reapplied by a task, before any of these run (tasks/main.yml, "Reapply
+# guest firewall when ..."): the worker's and the relay's ExecStartPre check the ruleset they
+# are about to run under. The relay restarts only when its binary or unit changed: a restart
+# cuts its open connections.
 - name: restart boxd-relay
   systemd:
     name: boxd-relay

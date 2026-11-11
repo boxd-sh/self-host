@@ -350,7 +350,6 @@
     src: boxd-guest-fw.sh  # vendored in this role's files/
     dest: /usr/local/bin/boxd-guest-fw
     mode: "0755"
-  notify: reapply guest firewall
 
 - name: Install guest firewall systemd service
   copy:
@@ -370,7 +369,6 @@
       WantedBy=multi-user.target
     dest: /etc/systemd/system/boxd-guest-fw.service
     mode: "0644"
-  notify: reapply guest firewall
 
 - name: Enable + start guest firewall service
   systemd:
@@ -378,6 +376,29 @@
     enabled: true
     state: started
     daemon_reload: true
+
+# A changed script or unit (new --private-service bounds, a new peer subnet) reaches the kernel
+# here: re-run the oneshot when either file is newer than its last start. One atomic nft batch
+# replaces the tables, so guests are never unfiltered. Not a handler: a later task's failure
+# drops a host's handlers, and the re-run, seeing both files unchanged, kept the old ruleset.
+- name: Reapply guest firewall when its script or unit is newer than the loaded ruleset
+  shell: |
+    set -eu
+    started=$(systemctl show boxd-guest-fw -p ActiveEnterTimestamp --value)
+    [ -n "$started" ] || exit 0
+    started=$(date -d "$started" +%s)
+    for f in /usr/local/bin/boxd-guest-fw /etc/systemd/system/boxd-guest-fw.service; do
+      if [ "$(stat -c %Y "$f")" -gt "$started" ]; then
+        systemctl daemon-reload
+        systemctl restart boxd-guest-fw
+        echo reapplied
+        exit 0
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: boxd_guest_fw_reapply
+  changed_when: "'reapplied' in boxd_guest_fw_reapply.stdout"
 
 # Fail closed: boxd-worker starts only when the firewall's tables are loaded,
 # so a firewall that failed at boot leaves the worker (and every VM) down
