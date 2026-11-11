@@ -201,7 +201,11 @@ dns_upstream = [
   hostnames. On AWS the VPC's resolver is its base address + 2
   (`10.70.0.2` for `10.70.0.0/16`).
 - It applies to every worker, and an `apply` that changes it restarts the
-  workers (on hosts, their machines keep running through it).
+  workers. On hosts their machines keep running through it. On `[gke]` it is
+  in the worker pod's environment, so the apply drains each worker (its
+  machines move to the others) and recreates its pod, one at a time; a worker
+  whose machines can't move stops the apply there, back in placement with its
+  old pod.
 - A box with an egress allowlist still gets only the names its allowlist
   covers: the others are refused before anything is forwarded.
 - [Private services](#private-services) don't need it: their names are
