@@ -1,6 +1,6 @@
 #!/bin/bash
 # Vendored from boxd-sh/boxd scripts/boxd-guest-fw.sh at
-# ca7c8a5dbb7ff77510003430129a73ea3bd1646c, unchanged below this note except that
+# 7dc2387ef85f2aa06faa7e64b6b82af302a5b969, unchanged below this note except that
 # references to boxd-internal tickets and sources are taken out of its
 # comments. Update it from there; do not edit it here.
 #
@@ -13,6 +13,8 @@
 #
 #   - the gateway's guest services (DNS 53, metadata 9002, vm_proxy 9003,
 #     egress 3128) and ping;
+#   - the relay for private services (3129) on its own gateway, only as a
+#     connection the worker's nft rule rewrote there;
 #   - other guests (same bridge, or another worker's guest range);
 #   - a peer worker's gateway on the same ports (a VM restored from another
 #     worker's snapshot still dials it);
@@ -91,6 +93,12 @@
 #   --routed          a routed worker: the inet table only (with --verify and
 #                     --metrics too)
 #   --legacy-gateway  an old gateway to DNAT to --gateway (repeat), --routed only
+#   --relay-user NAME the relay for private services runs as NAME:
+#                     its own connections are limited to --private-service and DNS.
+#                     With --verify: also require that chain
+#   --private-service CIDR:PORT  a private service's target (a fixed target is a
+#                     /32) and port the relay user may connect to (repeat);
+#                     --relay-user only
 #   --routed-pool     a bridge worker in a cluster with routed workers: their
 #                     machines' pool (10.N.0.0/16), reached through the transit
 #                     route; its x.y.0.0/24 (gateway, hosts) stays dropped
@@ -102,6 +110,9 @@ BR0=boxd-br0
 BR1=boxd-br1                    # second bridge, no address of its own
 BR1_VETH=veth-br10              # boxd-br1's end of the bridge join
 GW_TCP_PORTS='53, 9002, 9003, 3128'
+# The relay for private services (boxd's RELAY_PORT).
+# Not in GW_TCP_PORTS: that list also opens peer gateways, and a box reaches only its own relay.
+RELAY_PORT=3129
 GW_UDP_PORTS='53'
 DEVICE_INGRESS_PORT=9460        # boxd-proxy device ingress
 # Never routed to the internet. 224.0.0.0/3 = multicast + reserved.
@@ -126,7 +137,7 @@ check_subnet() {
 prefix16() { local s=${1%/16}; echo "${s%.0.0}"; }   # 10.31.0.0/16 -> 10.31
 
 SUBNET='' GATEWAY='' MODE=apply BEST_EFFORT=0 ROUTED=0 ROUTED_POOL=''
-PEERS=() PROXIES=() HOST_PORTS=() LEGACY_GWS=()
+PEERS=() PROXIES=() HOST_PORTS=() LEGACY_GWS=() RELAY_USER='' PRIVATE_SERVICES=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --subnet)        SUBNET=${2:?}; shift 2 ;;
@@ -143,6 +154,8 @@ while [ $# -gt 0 ]; do
         --routed)        ROUTED=1; shift ;;
         --legacy-gateway) LEGACY_GWS+=("${2:?}"); shift 2 ;;
         --routed-pool)   ROUTED_POOL=${2:?}; shift 2 ;;
+        --relay-user)    RELAY_USER=${2:?}; shift 2 ;;
+        --private-service)       PRIVATE_SERVICES+=("${2:?}"); shift 2 ;;
         -h|--help)       sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
         *)               die "unknown argument '$1' (see --help)" ;;
     esac
@@ -156,11 +169,21 @@ remove_batch() {
 TABLES=("bridge boxd_guest" "inet boxd_guest")
 [ "$ROUTED" = 1 ] && TABLES=("inet boxd_guest")
 
+if [ -n "$RELAY_USER" ]; then
+    [[ "$RELAY_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "--relay-user must be a user name, got '$RELAY_USER'"
+fi
+
 if [ "$MODE" = verify ]; then
     for t in "${TABLES[@]}"; do
         # shellcheck disable=SC2086
         nft list table $t >/dev/null 2>&1 || die "table $t is not loaded: guests would run unfiltered (systemctl status boxd-guest-fw)"
     done
+    if [ -n "$RELAY_USER" ]; then
+        nft list chain inet boxd_guest relay_only >/dev/null 2>&1 \
+            || die "chain inet boxd_guest relay_only is not loaded: the relay would run unfiltered (boxd-guest-fw needs --relay-user $RELAY_USER)"
+        echo "boxd-guest-fw: ${#TABLES[@]} table(s) and the relay's chain loaded"
+        exit 0
+    fi
     echo "boxd-guest-fw: ${#TABLES[@]} table(s) loaded"
     exit 0
 fi
@@ -265,6 +288,13 @@ for p in ${HOST_PORTS[@]+"${HOST_PORTS[@]}"}; do
     [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( p >= 1 && p <= 65535 )) \
         || die "--host-tcp-port must be a port number, got '$p'"
 done
+[ ${#PRIVATE_SERVICES[@]} -eq 0 ] || [ -n "$RELAY_USER" ] || die "--private-service needs --relay-user"
+for x in ${PRIVATE_SERVICES[@]+"${PRIVATE_SERVICES[@]}"}; do
+    bad="--private-service must be CIDR:PORT (e.g. 10.70.1.0/24:443, 10.70.1.50/32:5432), got '$x'"
+    [[ "$x" =~ ^([0-9.]+)/([0-9]{1,2}):([0-9]{1,5})$ ]] || die "$bad"
+    a=${BASH_REMATCH[1]} l=${BASH_REMATCH[2]} p=${BASH_REMATCH[3]}   # is_ipv4 overwrites BASH_REMATCH
+    is_ipv4 "$a" && (( l <= 32 && p >= 1 && p <= 65535 )) || die "$bad"
+done
 
 join() { local IFS=, s; s="$*"; echo "${s//,/, }"; }
 
@@ -283,6 +313,38 @@ onlink_rules() {
         echo "		ip daddr { $(join "${PROXIES[@]}") } tcp dport $DEVICE_INGRESS_PORT accept comment \"device ingress\""
     fi
     echo "		counter drop comment \"on-link infrastructure: proxies, peer workers, anything else\""
+}
+
+# The relay for private services, in the inet table of both renderers: what boxes may reach of
+# it, and what its own user may reach. The match on the user is positive and jumps: a packet the
+# kernel makes with no socket (a reset, an ICMP error) has no user, matches nothing and takes the
+# chain's accept.
+relay_input_rule() {
+    echo "		ip daddr $GATEWAY tcp dport $RELAY_PORT ct status dnat accept comment \"private services: steered connections only\""
+}
+
+relay_chains() {
+    [ -n "$RELAY_USER" ] || return 0
+    cat <<EOF
+
+	chain relay_out {
+		type filter hook output priority filter; policy accept;
+		meta skuid "$RELAY_USER" jump relay_only
+	}
+
+	chain relay_only {
+		ct state established,related accept
+		oifname "lo" accept comment "the host's stub resolver, the relay's own metrics"
+		meta l4proto { tcp, udp } th dport 53 accept comment "the host's resolver"
+EOF
+    local x
+    for x in ${PRIVATE_SERVICES[@]+"${PRIVATE_SERVICES[@]}"}; do
+        echo "		ip daddr ${x%:*} tcp dport ${x##*:} accept comment \"private service\""
+    done
+    cat <<EOF
+		counter drop comment "relay: outside the declared services"
+	}
+EOF
 }
 
 render() {
@@ -337,6 +399,7 @@ table inet boxd_guest {
 		ip daddr $GATEWAY udp dport { $GW_UDP_PORTS } accept
 		ip daddr $GATEWAY icmp type echo-request accept
 EOF
+    relay_input_rule
     if [ ${#HOST_PORTS[@]} -gt 0 ]; then
         echo "		tcp dport { $(join "${HOST_PORTS[@]}") } accept comment \"--host-tcp-port\""
     fi
@@ -372,8 +435,9 @@ EOF
     cat <<EOF
 		ip daddr { $NONPUBLIC } counter drop comment "control network and other non-internet ranges"
 	}
-}
 EOF
+    relay_chains
+    echo "}"
 }
 
 # A routed worker's ruleset (--routed): no bridge, so the inet table alone. The
@@ -413,6 +477,9 @@ EOF
 		ip daddr $GATEWAY tcp dport { $GW_TCP_PORTS } accept
 		ip daddr $GATEWAY udp dport { $GW_UDP_PORTS } accept
 		ip daddr $GATEWAY icmp type echo-request accept
+EOF
+    relay_input_rule
+    cat <<EOF
 		counter drop comment "this host's other ports and addresses"
 	}
 
@@ -433,8 +500,9 @@ EOF
     cat <<EOF
 		ip daddr { $NONPUBLIC } counter drop comment "control network and other non-internet ranges"
 	}
-}
 EOF
+    relay_chains
+    echo "}"
 }
 
 bridge_supported() {
