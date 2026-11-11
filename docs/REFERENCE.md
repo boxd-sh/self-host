@@ -181,6 +181,33 @@ proxies' device ingress and the internet. They can't reach the hosts'
 other ports, the VPC or other private ranges, or the cloud metadata service.
 `boxd-worker` won't start without the firewall's tables loaded.
 
+### DNS for boxes (`[worker] dns_upstream`)
+
+A box's only resolver is its gateway: the worker answers `<name>.boxd` itself
+and forwards every other name, to `8.8.8.8` unless you say otherwise. Set the
+resolvers when boxes must resolve names only your DNS knows, or when DNS to
+the internet is blocked:
+
+```toml
+[worker]
+dns_upstream = [
+    "10.70.0.2",                       # the default, for every other name (IP or IP:port)
+    "corp.example.com=10.80.0.53",     # names in corp.example.com go here (longest zone wins)
+]
+```
+
+- Exactly one entry without a zone; any number of `zone=resolver`.
+  Resolvers are IP addresses (with an optional port, `[IPv6]:port`), not
+  hostnames. On AWS the VPC's resolver is its base address + 2
+  (`10.70.0.2` for `10.70.0.0/16`).
+- It applies to every worker, and an `apply` that changes it restarts the
+  workers (on hosts, their machines keep running through it).
+- A box with an egress allowlist still gets only the names its allowlist
+  covers: the others are refused before anything is forwarded.
+- [Private services](#private-services) don't need it: their names are
+  answered by the worker, and the relay resolves `target_subnets` names with
+  the worker host's own resolver.
+
 ### Private services
 
 Boxes can't reach the VPC or any other private address. To let them call a

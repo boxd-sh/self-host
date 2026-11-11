@@ -362,6 +362,40 @@ def resolver_addr(value) -> str:
         raise ValueError(f"bad port in {value!r}")
     return f"[{ip}]:{port}" if ip.version == 6 else f"{ip}:{port}"
 
+def dns_upstream(value) -> str:
+    """[worker].dns_upstream (a list, or one comma-separated string) as boxd-worker's
+    BOXD_DNS_UPSTREAM: exactly one bare resolver, the default, and any number of
+    `zone=resolver` for the names in that zone (the longest zone wins), each resolver `IP` or
+    `IP:port`. boxd-worker refuses to start on a value it can't parse, so this is exact."""
+    items = value.split(",") if isinstance(value, str) else value
+    if not isinstance(items, list) or not items or not all(isinstance(i, str) for i in items):
+        raise ValueError("must be a list of resolvers, e.g. [\"10.70.0.2\", "
+                         "\"corp.example.com=10.70.0.53\"]")
+    default, zones, out = None, [], []
+    for raw in (i.strip() for i in items):
+        if not raw:
+            raise ValueError("an empty entry")
+        zone, eq, addr = raw.rpartition("=") if "=" in raw else ("", "", raw)
+        if eq:
+            labels = zone.strip().rstrip(".").lower().split(".")
+            if not all(re.fullmatch(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?", lbl)
+                       for lbl in labels):
+                raise ValueError(f"zone {zone!r} in {raw!r} is not a DNS name")
+            z = ".".join(labels)
+            if z in zones:
+                raise ValueError(f"zone {z} is given twice")
+            zones.append(z)
+            out.append(f"{z}={resolver_addr(addr.strip())}")
+        else:
+            if default is not None:
+                raise ValueError(f"more than one default resolver ({default} and {raw}); "
+                                 "give the others a zone: zone=IP")
+            default = resolver_addr(raw)
+            out.append(default)
+    if default is None:
+        raise ValueError("needs one resolver without a zone: the default for every other name")
+    return ",".join(out)
+
 def _cloud_name(doc: dict) -> str:
     return next(k for k in clouds.CLOUDS if k in doc)
 
@@ -584,6 +618,12 @@ def _validate_worker_and_services(doc: dict, cloud: str, mod, errs: list[str]) -
                 and all(isinstance(gb, int) and not isinstance(gb, bool) and gb > 0 for gb in swap)):
             errs.append("[worker].swap_gb must be a non-empty list of sizes in GB, one swap "
                         "file each (e.g. [64, 256])")
+
+    if "dns_upstream" in wk:
+        try:
+            dns_upstream(wk["dns_upstream"])
+        except ValueError as e:
+            errs.append(f"[worker].dns_upstream: {e}")
 
     if "acme" not in doc:
         errs.append('[acme] required: contact_email (public CAs), or ca = "local"')

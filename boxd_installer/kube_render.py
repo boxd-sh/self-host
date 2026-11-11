@@ -685,6 +685,8 @@ class KubeRenderer(render.Renderer):
                self._env("BOXD_IMAGE_REGISTRY", gke.registry(self.cfg.doc))]
         if lssd:
             env.append(self._env("LOCAL_SSD", "1"))
+        if (upstream := self.dns_upstream()) is not None:
+            env.append(self._env("BOXD_DNS_UPSTREAM", upstream))
         worker = {
             "name": "worker", "image": self.image(), "args": ["worker"], "env": env,
             "securityContext": {"privileged": True},

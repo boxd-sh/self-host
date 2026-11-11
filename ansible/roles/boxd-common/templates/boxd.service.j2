@@ -21,6 +21,9 @@ Environment=BOXD_METRICS_LISTEN=127.0.0.1:9103
 {% elif boxd_service == 'boxd-worker' %}
 Environment=BOXD_METRICS_LISTEN=127.0.0.1:9104
 Environment=BOXD_TEMPLATE_WARMUP_ANTHROPIC_KEY={{ boxd_template_warmup_anthropic_key | default('') }}
+{% if boxd_dns_upstream | default('') %}
+Environment=BOXD_DNS_UPSTREAM={{ boxd_dns_upstream }}
+{% endif %}
 {% endif %}
 ExecStart=/usr/local/bin/{{ boxd_binary }} --config={{ boxd_config_dir }}/{{ boxd_role_name }}.toml
 Restart=always

@@ -583,7 +583,8 @@ the worker (two nodes can't share an address).
   wherever it would advertise the Elastic IPs: the DNS records, and the
   proxy IP the CLI and console show. Outbound traffic still leaves through
   the NAT gateway, so the public subnet, internet gateway and NAT gateway
-  stay. VMs reach `*.<zone>` on the private proxy IP too.
+  stay. VMs don't reach the private proxy IP: the guest firewall keeps them
+  off the VPC's addresses (they reach each other as `<name>.boxd`).
 - **Needs the local CA** ([TLS from your own CA](REFERENCE.md#tls-from-your-own-ca)).
   Public CAs validate by querying the cluster's nameservers from the
   internet, which a private cluster can't answer, so `validate` refuses

@@ -455,6 +455,11 @@ class Renderer:
     def _ns_map(self) -> dict:
         return {n.qualifiers["dns"]: n for n in self.cfg.nodes_with("dns")}
 
+    def dns_upstream(self) -> str | None:
+        """[worker].dns_upstream as boxd-worker's BOXD_DNS_UPSTREAM, None when unset."""
+        value = self.cfg.table("worker").get("dns_upstream")
+        return None if value is None else config.dns_upstream(value)
+
     def private_services(self) -> list[dict]:
         """[[worker.private_services]] as boxd reads it: each table with the service address the
         installer allocated for its name, the same on every worker."""
@@ -495,6 +500,9 @@ class Renderer:
         # The installer's own: the worker role sets these up on the host.
         worker.pop("ksm", None)
         worker.pop("swap_gb", None)
+        # An environment variable of the worker's unit, not a key of its config (boxd reads
+        # BOXD_DNS_UPSTREAM).
+        worker.pop("dns_upstream", None)
         for k in ("warm_slots", "nested_virt", "tc_filters"):
             if k in node.raw:
                 worker[k] = node.raw[k]
@@ -624,6 +632,10 @@ class Renderer:
         # The worker role ships deploy-config/<worker>/bucket.toml (0600), or
         # removes a bucket file left from before.
         lines.append(f"boxd_storage_engine: {'true' if config.storage_engine_on(cfg.doc) else 'false'}")
+        # The resolvers boxes' DNS goes to (boxd-worker's BOXD_DNS_UPSTREAM); unset: boxd's
+        # default.
+        if (upstream := self.dns_upstream()) is not None:
+            lines.append(f'boxd_dns_upstream: "{upstream}"')
         # The relay for private services: its unit and user, and the firewall's second copy of
         # where it may connect (--private-service CIDR:PORT). Empty: neither.
         bounds = private_services.firewall_bounds(private_services.declared(cfg.doc))
