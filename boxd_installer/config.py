@@ -16,7 +16,8 @@ SERVICE_TABLES = {
     "github", "google", "oidc", "resend", "analytics", "backups",
     "automations", "templates", "snapshot_archive", "storage_engine",
 }
-INSTALLER_TABLES = {"cluster", "network", "nodes", "license", "telemetry"} | set(clouds.CLOUDS)
+INSTALLER_TABLES = ({"cluster", "network", "nodes", "license", "telemetry", "images"}
+                    | set(clouds.CLOUDS) | set(clouds.TARGETS))
 ACME_CAS = ("gts", "zerossl", "local")
 PRIVATE_NET = ipaddress.ip_network("10.0.0.0/8")
 SHA_RE = r"[0-9a-f]{40}"
@@ -238,6 +239,12 @@ class Config:
         self.env_group: str = self.name.replace("-", "_")
         self.cloud_name: str = _cloud_name(doc)
         self.cloud: dict = doc[self.cloud_name]
+        # A target table ([gke]) deploys on the cloud's account differently:
+        # pods instead of instances (clouds/__init__.py).
+        self.target: str | None = next((t for t in clouds.TARGETS if t in doc), None)
+        if self.target == "gke":
+            self._init_gke(doc)
+            return
         self.vpc_cidr: str = self.cloud["vpc_cidr"]
         self.network: dict = doc["network"]
         self.network_mode: str = self.network.get("mode", "bridge")
@@ -251,6 +258,24 @@ class Config:
         # "private": proxy/dns get no public IP and advertise their internal
         # ones (AWS only; clients come in over Twingate or similar).
         self.ingress: str = self.cloud.get("ingress", "public")
+
+    def _init_gke(self, doc: dict) -> None:
+        """[gke]: one synthetic node per pod (clouds/gke.py topology_nodes), so
+        the node-id allocation and the renderer work as for instances. The
+        nodes' subnet of an existing cluster is known only from terraform
+        (vpc_cidr None here; the renderer reads it from the outputs)."""
+        from .clouds import gke
+        g = doc["gke"]
+        self.vpc_cidr = g.get("vpc_cidr")
+        # Routed only; the VNI range is unused there but every config carries it.
+        self.network = {"vni_range_start": 100, "vni_range_end": 10000, "mode": "routed",
+                        **doc.get("network", {})}
+        self.network_mode = "routed"
+        self.pool = self.network.get("pool")
+        self.nodes = [Node(n) for n in gke.topology_nodes(doc)]
+        self.interface = gke.IFACE
+        self.acme_ca = doc.get("acme", {}).get("ca", gke.DEFAULT_CA)
+        self.ingress = "private" if gke.settings(doc)["ingress"] == "internal" else "public"
 
     def apply_overlay(self, overlay: dict) -> None:
         """Secret provider tables from the encrypted state; they win over
@@ -359,11 +384,20 @@ def _validate(doc: dict) -> None:
         raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
     cloud = present[0]
     mod = clouds.CLOUDS[cloud]
+    targets = [t for t in clouds.TARGETS if t in doc]
+    target = targets[0] if targets else None
+    if target and clouds.TARGETS[target][1] != cloud:
+        errs.append(f"[{target}] needs [{clouds.TARGETS[target][1]}] beside it (the project, "
+                    f"region and state bucket), not [{cloud}]")
+        raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
+    tmod = clouds.TARGETS[target][0] if target else None
+    if "images" in doc and target != "gke":
+        errs.append("[images] is only for [gke] clusters (where boxd's images come from)")
 
     routed = doc.get("network", {}).get("mode") == "routed"
     for tbl, keys in (("cluster", ("name", "zone", "assets_version")),
-                      (cloud, mod.REQUIRED),
-                      ("network", ("vni_range_start", "vni_range_end")
+                      (cloud, tmod.CLOUD_REQUIRED if tmod else mod.REQUIRED),
+                      ("network", ("pool",) if tmod else ("vni_range_start", "vni_range_end")
                        + (("pool",) if routed else ("bridge_subnet_base",)))):
         missing = [k for k in keys if k not in doc.get(tbl, {})]
         if missing:
@@ -382,6 +416,25 @@ def _validate(doc: dict) -> None:
     if "org_name" in doc["cluster"] and (why := org_name_error(doc["cluster"]["org_name"])):
         errs.append(f"[cluster].org_name {why}")
 
+    if tmod:
+        tmod.validate(doc, errs)
+    else:
+        _validate_nodes_and_network(doc, cloud, mod, errs)
+    _validate_worker_and_services(doc, cloud, mod, errs)
+    if not tmod:
+        mod.validate(doc, errs)
+    _validate_templates(doc, errs)
+    _validate_snapshot_archive(doc, errs)
+    _validate_storage_engine(doc, errs)
+    _validate_oidc(doc, errs)
+    _validate_license(doc, errs)
+    _validate_telemetry(doc, errs)
+
+    if errs:
+        raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
+
+def _validate_nodes_and_network(doc: dict, cloud: str, mod, errs: list[str]) -> None:
+    """[[nodes]], the VPC and [network] of a cluster on instances or hosts."""
     try:
         vpc = ipaddress.ip_network(doc[cloud]["vpc_cidr"])
     except ValueError as e:
@@ -510,6 +563,12 @@ def _validate(doc: dict) -> None:
     if not net.get("vni_range_start", 0) < net.get("vni_range_end", 0):
         errs.append("[network] vni_range_start must be < vni_range_end")
 
+    consoles = [n["name"] for n in nodes if any(r.split(":")[0] == "console" for r in n.get("roles", []))]
+    if len(consoles) > 1:
+        errs.append(f"at most one console node supported, got {consoles}")
+
+def _validate_worker_and_services(doc: dict, cloud: str, mod, errs: list[str]) -> None:
+    """[worker], [acme] and [automations]: the same on every target."""
     tcf = doc.get("worker", {}).get("tc_filters")
     if tcf is not None and tcf not in TC_FILTERS:
         errs.append(f"[worker].tc_filters must be one of {', '.join(TC_FILTERS)}, got {tcf!r}")
@@ -548,21 +607,6 @@ def _validate(doc: dict) -> None:
     for k in ("auth_configs", "webhook_secret", "connect_domain"):
         if k in doc.get("automations", {}):
             errs.append(f"[automations].{k} is derived by the installer — remove it")
-
-    mod.validate(doc, errs)
-    _validate_templates(doc, errs)
-    _validate_snapshot_archive(doc, errs)
-    _validate_storage_engine(doc, errs)
-    _validate_oidc(doc, errs)
-    _validate_license(doc, errs)
-    _validate_telemetry(doc, errs)
-
-    consoles = [n["name"] for n in nodes if any(r.split(":")[0] == "console" for r in n.get("roles", []))]
-    if len(consoles) > 1:
-        errs.append(f"at most one console node supported, got {consoles}")
-
-    if errs:
-        raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
 
 # boxd-console trims [oidc] values with Rust's str::trim, which takes the
 # Unicode White_Space characters. Python's str.strip() also takes

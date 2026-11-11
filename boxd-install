@@ -5,10 +5,13 @@
 #   ./boxd-install validate | apply | providers edit | …   ./install.py <args>
 #   ./boxd-install gcloud auth login --no-launch-browser     a tool in the image
 #   ./boxd-install aws sso login --use-device-code
+#   ./boxd-install kubectl -n boxd get pods                  GKE clusters (credentials: below)
 #   ./boxd-install shell                                     a shell in the image
 #
 # Your gcloud and aws logins live in ~/.config/gcloud and ~/.aws (shared with
-# any host install); gcloud's ssh key in ~/.config/boxd-install/ssh. BOXD_STATE_KEY, BOXD_PRODUCT_LICENSE and AWS_* pass
+# any host install); gcloud's ssh key in ~/.config/boxd-install/ssh; kubectl's
+# credentials (`./boxd-install gcloud container clusters get-credentials …`)
+# in ~/.config/boxd-install/kube, never your own ~/.kube. BOXD_STATE_KEY, BOXD_PRODUCT_LICENSE and AWS_* pass
 # through from your environment by name; their values never reach a command
 # line. So does BOXD_RELEASES_URL (a copy of boxd's release bucket, for
 # tests); a file:// one is mounted read-only at the same path. The image is ghcr.io/boxd-sh/self-host-tools:<docker/VERSION>;
@@ -29,6 +32,8 @@ mkdir -p "$HOME/.config/gcloud" "$HOME/.aws"
 # it every run minted a new key and added it to the project's ssh metadata.
 SSH_DIR="$HOME/.config/boxd-install/ssh"
 mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
+KUBE_DIR="$HOME/.config/boxd-install/kube"
+mkdir -p "$KUBE_DIR" && chmod 700 "$KUBE_DIR"
 # The editor for `providers edit` must exist in the image.
 case "${EDITOR:-}" in vi|vim|nano) ;; *) EDITOR=nano ;; esac
 
@@ -37,6 +42,7 @@ args=(--rm -i --user "$(id -u):$(id -g)"
       -v "$HOME/.config/gcloud:/home/installer/.config/gcloud"
       -v "$HOME/.aws:/home/installer/.aws"
       -v "$SSH_DIR:/home/installer/.ssh"
+      -v "$KUBE_DIR:/home/installer/.kube"
       -e EDITOR="$EDITOR")
 [ -t 0 ] && [ -t 1 ] && args+=(-t)
 for v in BOXD_STATE_KEY BOXD_PRODUCT_LICENSE BOXD_RELEASES_URL \
@@ -45,6 +51,16 @@ for v in BOXD_STATE_KEY BOXD_PRODUCT_LICENSE BOXD_RELEASES_URL \
          CLOUDSDK_CORE_PROJECT; do
     [ -n "${!v:-}" ] && args+=(-e "$v")
 done
+# A gcloud credential file override (a service account key in CI, say), at the same file inside
+# the image: it must be under ~/.config/gcloud, which is mounted there.
+if [ -n "${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE:-}" ]; then
+    case "$CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE" in
+        "$HOME/.config/gcloud/"*)
+            args+=(-e "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=/home/installer/.config/gcloud/${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE#"$HOME/.config/gcloud/"}") ;;
+        *) echo "boxd-install: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE must name a file under ~/.config/gcloud" >&2
+           exit 1 ;;
+    esac
+fi
 case "${BOXD_RELEASES_URL:-}" in
     file:///*) d="${BOXD_RELEASES_URL#file://}"
                [ -d "$d" ] || { echo "boxd-install: BOXD_RELEASES_URL: no directory $d" >&2; exit 1; }
@@ -52,7 +68,7 @@ case "${BOXD_RELEASES_URL:-}" in
 esac
 
 case "${1:-}" in
-    gcloud|aws|terraform|ansible|ansible-playbook|ssh) exec docker run "${args[@]}" "$IMAGE" "$@" ;;
+    gcloud|aws|terraform|ansible|ansible-playbook|ssh|kubectl) exec docker run "${args[@]}" "$IMAGE" "$@" ;;
     shell) shift; exec docker run "${args[@]}" "$IMAGE" bash "$@" ;;
     *) exec docker run "${args[@]}" "$IMAGE" ./install.py "$@" ;;
 esac

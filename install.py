@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""boxd self-host installer for GCP and AWS. Stdlib only (Python >= 3.11).
+"""boxd self-host installer for GCP, GKE, AWS and bare metal. Stdlib only (Python >= 3.11).
 
     ./install.py validate                 check cluster.toml
     ./install.py render                   regenerate out/ from cached tf outputs
@@ -7,6 +7,7 @@
     ./install.py apply                    full pipeline: assets -> terraform ->
                                           render -> ansible -> post-install
     ./install.py destroy                  terraform destroy (state/ untouched)
+    ./install.py ctl -- <args>            boxd-ctl on the cluster (GKE: in the control pod)
 """
 import sys
 

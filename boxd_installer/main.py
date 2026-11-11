@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 
+import shlex
 import shutil as _shutil
 import subprocess
 
@@ -31,8 +32,37 @@ def _renderer(cfg, state, fake_tf: str | None) -> render.Renderer:
     alloc = state.allocate(cfg)
     return render.Renderer(cfg, alloc, tf_out, state)
 
+def _render_files(cfg, state, fake_tf: str | None) -> dict[str, str]:
+    """What `render` writes: the per-host configs and ansible inventory, or on
+    GKE the boxd-config Secret's files and every Kubernetes object."""
+    if not clouds.kubernetes(cfg):
+        return _renderer(cfg, state, fake_tf).render_all()
+    import json
+    from . import kube_render
+    from .clouds import gke
+    if fake_tf:
+        state.ensure_keypairs()
+    cfg.apply_overlay(state.load_providers())
+    r = kube_render.KubeRenderer(cfg, state.allocate(cfg), tf.cached_outputs(state, fake_tf), state)
+    n = gke.settings(cfg.doc)["pools"]["worker"]["nodes"]
+    files, hashes = r.config_files(range(n))
+    downloads = r.downloads()
+    # What kube.deploy applies, in its order.
+    objs = (r.base_objects(downloads) + r.clickhouse_objects(hashes.get("clickhouse", ""))
+            + r.control_objects(hashes["control"])
+            + r.console_objects(hashes["console"], downloads=downloads))
+    for node in cfg.nodes_with("proxy"):
+        objs += r.edge_objects(gke.ordinal(node.name), hashes, downloads=downloads)
+    objs += r.worker_objects(n) + r.pod_monitorings()
+    out = {f"boxd-config/{k}": v for k, v in files.items()}
+    out["manifests.json"] = json.dumps({"apiVersion": "v1", "kind": "List", "items": objs},
+                                       indent=1) + "\n"
+    return out
+
 def cmd_validate(args) -> int:
     cfg = config.load(args.cluster)
+    if clouds.kubernetes(cfg):
+        return _validate_gke(cfg)
     # A warning, not an error: renaming a node replaces its instance, so a
     # running cluster keeps the names it has.
     if odd := [n.name for n in cfg.nodes if not n.name.startswith(f"{cfg.name}-")]:
@@ -54,20 +84,46 @@ def cmd_validate(args) -> int:
         print(oidc.check_discovery(cfg.doc["oidc"]))
     return 0
 
+def _validate_gke(cfg) -> int:
+    """[gke]: the file, the worker pool against the license, and what can
+    only be read from the project (the org policy; an existing cluster)."""
+    from .clouds import gke
+    errs = telemetry.errors(cfg) + gke.license_errors(cfg)
+    live_errs, live_warns, _ = gke.live_checks(cfg)
+    for warning in (gke.warnings(cfg) + live_warns + telemetry.warnings(cfg)
+                    + config.network_warnings(cfg)):
+        log(f"warning: {warning}")
+    if errs + live_errs:
+        raise InstallError("\n  ".join(["cluster.toml can't be installed on GKE:"] + errs + live_errs))
+    print("cluster.toml OK")
+    print(telemetry.validate_line(cfg))
+    if "oidc" in cfg.doc:
+        print(oidc.check_discovery(cfg.doc["oidc"]))
+    return 0
+
 def cmd_render(args) -> int:
     cfg = config.load(args.cluster)
     if args.fake_tf:
         state = State(args.state_dir)
-        _write_out(_renderer(cfg, state, args.fake_tf).render_all(), args.out_dir)
+        _write_out(_render_files(cfg, state, args.fake_tf), args.out_dir)
         return 0
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
         state = State(args.state_dir)
-        _write_out(_renderer(cfg, state, None).render_all(), args.out_dir)
+        _write_out(_render_files(cfg, state, None), args.out_dir)
     return 0
+
+def _checkpoint(cfg, args) -> None:
+    """Push the state before terraform creates anything from it: the values made for this
+    cluster on its first apply (the KMS key ring's suffix, keys, the egress CA) must be in
+    the state bucket before resources carry them, or a run cut short makes them anew on the
+    next apply and terraform replaces what the first one created."""
+    remote_state.push(cfg, args.state_dir, delete_local=False)
 
 def cmd_apply(args) -> int:
     cfg = config.load(args.cluster)
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
+        if clouds.kubernetes(cfg):
+            return _apply_gke(cfg, args)
         return _apply(cfg, args)
 
 def _apply(cfg, args) -> int:
@@ -111,7 +167,7 @@ def _apply(cfg, args) -> int:
         tf.plan(cfg, tfvars, plan)
         # Before the apply: a replaced control node takes its state with it.
         control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
-        tf.apply_plan(cfg, plan)
+        tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
     tf_out = tf.read_outputs(cfg, state)
     ansible.set_tf_outputs(tf_out)
 
@@ -161,6 +217,14 @@ def _apply(cfg, args) -> int:
     if restarted:
         log("after the restart, every node registered")
     control_carry.clear(state)
+    return _finish(cfg, args, state, r, key, storage, assets_root)
+
+def _finish(cfg, args, state, r, key, storage, assets_root: str,
+            image_override=None) -> int:
+    """Every target, once every node runs the new bundle and every worker
+    registered: the bucket, the cluster id, machine specs, the license, the
+    storage switches, telemetry, templates and orgs, then the state record
+    and the DNS delegation."""
     # Before any switch: a worker that can't open its bucket fails the apply.
     storage_engine.wait_bucket_open(cfg)
 
@@ -185,6 +249,8 @@ def _apply(cfg, args) -> int:
         ansible.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
 
     image, tag = assets.computer_image(assets_root)
+    if image_override:
+        image = image_override(image)
     ansible.seed_templates(cfg, image, tag, cfg.assets_version,
                            storage=storage_engine.template_storage(cfg))
     ansible.configure_orgs(cfg, cfg.machine_sizes())
@@ -207,6 +273,70 @@ def _apply(cfg, args) -> int:
             "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
             "  ./boxd-install state reset-eab\n  ./boxd-install apply")
     return 0
+
+def _apply_gke(cfg, args) -> int:
+    """apply on GKE ([gke]): terraform/gke for the cloud side, then the
+    Kubernetes objects (kube.deploy), then the same post-install steps as on
+    instances. An upgrade is an apply with a new assets_version: control,
+    console and the edges roll; workers are updated in place."""
+    from . import kube, kube_render
+    from .clouds import gke
+    key = license.key_path(cfg)
+    if errs := telemetry.errors(cfg) + gke.license_errors(cfg):
+        raise InstallError("; ".join(errs))
+    state = State(args.state_dir)
+    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
+    if oidc_table and (why := render.oidc_render_error(oidc_table)):
+        raise InstallError(why)
+    errs, warns, facts = gke.live_checks(cfg)
+    errs += gke.state_errors(cfg, state)
+    for warning in gke.warnings(cfg) + warns:
+        log(f"warning: {warning}")
+    if errs:
+        raise InstallError("\n  ".join(["this apply can't go on:"] + errs))
+    state.ensure_keypairs()
+    ansible.set_keys_dir(state.keys_dir)
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    assets_root = assets.ensure(cfg, args.cache_dir, state)
+    check_storage_bundle(cfg, assets_root)
+    # The guard asks a cluster that exists through the previous apply's outputs.
+    storage = storage_engine.check_guard(cfg, state, assets_root)
+
+    tf.init(cfg)
+    # The pool never shrinks under a running worker: kube.deploy drains and
+    # removes workers (and their nodes) itself.
+    live = kube.live_worker_replicas(cfg, state)
+    tfvars = gke.write_tfvars(cfg, state, args.out_dir, live, facts)
+    plan = os.path.join(args.out_dir, "tf.plan")
+    tf.plan(cfg, tfvars, plan)
+    # Every plan, the first included: a state that was lost looks like a first apply, and its
+    # plan is the one that would replace what the cluster already has.
+    import json
+    if problems := gke.plan_problems(json.loads(tf.show_json(cfg, plan))):
+        raise InstallError("\n  ".join(["refusing the terraform plan:"] + problems))
+    tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
+    tf_out = tf.read_outputs(cfg, state)
+    ansible.set_tf_outputs(tf_out)
+    kube.connect(cfg, tf_out)
+
+    cfg.apply_overlay(state.load_providers())
+    if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
+                                      if cfg.table(t)}):
+        log(f"warning: {inert}")
+    composio.sync_auth_configs(cfg, state, assets_root)
+    ensure_egress_ca(cfg, state)
+    storage_engine.adopt_prefix(cfg, state)
+    alloc = state.allocate(cfg)
+    r = kube_render.KubeRenderer(cfg, alloc, tf_out, state, assets_root=assets_root,
+                                 pull_config=kube.pull_config(cfg))
+    storage_engine.check_identity(cfg, storage, r)
+    if state.data.get("applied_assets") and bundle_changes(state, cfg):
+        ansible.pause_machine_specs(cfg)
+    kube.deploy(cfg, r, state, args.out_dir, tf_out)
+    gke.record(cfg, state)
+    return _finish(cfg, args, state, r, key, storage, assets_root,
+                   image_override=lambda image: gke.computer_image(cfg.doc, image))
 
 def check_storage_bundle(cfg, assets_root: str) -> None:
     """[storage_engine] needs a bundle built with the storage engine (its
@@ -282,7 +412,9 @@ def cmd_destroy(args) -> int:
         state = State(args.state_dir)
         tfvars = os.path.join(args.out_dir, "terraform.tfvars.json")
         tf.init(cfg)
-        if not os.path.exists(tfvars):
+        if clouds.kubernetes(cfg):
+            _destroy_gke_prepare(cfg, state, args.out_dir)
+        elif not os.path.exists(tfvars):
             # No license check: destroying never depends on the key file.
             tfvars = tf.write_tfvars(cfg, state, args.out_dir, tf.instance_types(cfg),
                                      for_destroy=True)
@@ -297,10 +429,57 @@ def cmd_destroy(args) -> int:
         # The instances are gone: the next apply is a new cluster, with a new
         # storage prefix and no guard.
         state.clear_storage_engine()
+        if clouds.kubernetes(cfg):
+            # A key ring outlives destroy: the next cluster gets a new one.
+            state.data.pop("gke", None)
+            state.save()
     print("infra destroyed. Encrypted state (ids, keys) kept in the state "
           "bucket — delete the installer-state.enc object only if this "
           "cluster is gone for good.")
     return 0
+
+def _destroy_gke_prepare(cfg, state, out_dir: str) -> None:
+    """GKE: the tfvars of the cluster as it is (every pool at its live size),
+    and in a cluster boxd didn't make, boxd's namespace and cluster-scoped
+    objects removed first (terraform takes the pools, not the objects)."""
+    from . import kube
+    from .clouds import gke
+    os.makedirs(out_dir, exist_ok=True)
+    live = kube.live_worker_replicas(cfg, state)
+    facts = {}
+    if not gke.settings(cfg.doc)["create"]:
+        try:
+            facts = gke.live_checks(cfg)[2]
+        except InstallError as e:
+            log(f"warning: can't read the cluster ({e}); destroying with defaults")
+    gke.write_tfvars(cfg, state, out_dir, live, facts)
+    if not gke.settings(cfg.doc)["create"] and state.data.get("gke"):
+        try:
+            kube.connect(cfg, tf.cached_outputs(state))
+            kube.teardown(cfg)
+        except InstallError as e:
+            log(f"warning: boxd's Kubernetes objects were not removed ({e}); delete the "
+                f"namespace {gke.settings(cfg.doc)['namespace']} by hand")
+
+def cmd_ctl(args) -> int:
+    """`./boxd-install ctl -- <boxd-ctl args>`: boxd-ctl on the cluster's
+    control node (over ssh, or on GKE in the control-0 pod). Stdin is passed
+    through (`ctl -- license install < license.key`)."""
+    cfg = config.load(args.cluster)
+    argv = list(args.ctl_args)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        raise InstallError("ctl needs boxd-ctl's arguments, e.g. ./boxd-install ctl -- status")
+    data = None if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+    with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
+        state = State(args.state_dir)
+        ansible.set_keys_dir(state.keys_dir)
+        ansible.set_tf_outputs(tf.cached_outputs(state))
+        res = ansible.ctl(cfg, shlex.join(argv), check=False, quiet=True, input=data or None)
+    sys.stdout.write(res.stdout or "")
+    sys.stderr.write(res.stderr or "")
+    return res.returncode
 
 def kept_buckets_message(state, kept: list[str]) -> str:
     """A destroy that failed only on buckets with objects in them
@@ -552,6 +731,10 @@ def main() -> int:
     pr.add_argument("--fake-tf", help="JSON file standing in for terraform outputs")
     sub.add_parser("apply")
     sub.add_parser("destroy")
+    pc = sub.add_parser("ctl", help="run boxd-ctl on the cluster: ctl -- <args>",
+                        description="boxd-ctl on a control node (on GKE, in the control-0 pod), "
+                                    "e.g. ./boxd-install ctl -- status")
+    pc.add_argument("ctl_args", nargs=argparse.REMAINDER)
     ps = sub.add_parser("state")
     ps.add_argument("action", choices=["pull", "push", "reset-eab"],
                     help="pull: decrypt into ./pulled-state; push: encrypt it back and delete it; "
@@ -576,6 +759,10 @@ Changes take effect on the next `apply`.""")
     pp.add_argument("key", nargs="?", help="CA private key PEM (for `set-tls-ca`)")
 
     args = p.parse_args()
+    # SIGTERM (`docker stop`, a cancelled CI job) unwinds like Ctrl-C: the state push in
+    # remote_state.synced's finally runs. Python's default would exit without it.
+    import signal
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     legacy_out = os.path.join(ROOT, "out")
     if os.path.isdir(legacy_out):
         shutil.rmtree(legacy_out)
@@ -609,7 +796,7 @@ Changes take effect on the next `apply`.""")
         tmp_out = True
     try:
         rc = {"validate": cmd_validate, "render": cmd_render,
-              "apply": cmd_apply, "destroy": cmd_destroy,
+              "apply": cmd_apply, "destroy": cmd_destroy, "ctl": cmd_ctl,
               "state": cmd_state, "providers": cmd_providers}[args.cmd](args)
     except InstallError as e:
         print(f"error: {e}", file=sys.stderr)

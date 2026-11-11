@@ -1,0 +1,200 @@
+# boxd self-host on Google Kubernetes Engine — cluster.toml
+#
+# Copy this file to cluster.toml at the root of the installer and work
+# through it top to bottom:
+#
+#   1. YOUR CLUSTER   — values you must change (marked CHANGE)
+#   2. GKE            — the cluster, its pools and its ingress
+#   3. OPTIONAL       — images, bucket storage, machine sizes, single sign-on
+#   4. LEAVE AS IS    — service settings; only change these if boxd asks you to
+#
+# Then check it, before anything is created:
+#
+#   ./boxd-install validate
+#   ./boxd-install apply 2>&1 | tee apply.log
+#
+# The same keys as the Compute Engine example (examples/gcp/cluster.toml),
+# except [gke], which replaces [gcp]'s instance fields and [[nodes]]: on GKE
+# the installer runs boxd's roles as pods (docs/INSTALL.md "Install on GKE"):
+#
+#   control    StatefulSet, 1 or 3 Raft voters, pod network, a disk each   (pool "system")
+#   console    StatefulSet, pod network                                   (pool "system")
+#   clickhouse StatefulSet, the usage graphs' store, a pd-ssd disk         (pool "system")
+#   proxy+dns  one of each per edge, host network, each edge on its own
+#              node behind its own passthrough load balancer IP           (pools "edge-<i>")
+#   worker     privileged, host network, one per node                     (pool "worker")
+#
+# Secrets never go in this file (OAuth clients, API keys): see
+# `./boxd-install providers edit`.
+
+# ============================================================ 1. YOUR CLUSTER
+
+[cluster]
+# CHANGE. Lowercase letters, digits and dashes; prefixes every GCP resource
+# (and names the GKE cluster with cluster = "create"). At most 22 characters.
+name = "mycluster"
+# CHANGE. The DNS zone the cluster serves. You delegate it from its parent
+# zone (NS + glue records) after the first apply.
+zone = "boxd.example.com"
+assets_version = "latest"
+# org_name = "Your Company"
+
+[gcp]
+project      = "my-gcp-project"          # CHANGE
+region       = "europe-west4"            # CHANGE if needed
+# CHANGE. Holds the terraform state and the encrypted installer state.
+# Create it once before the first apply, with versioning.
+state_bucket = "mycluster-state"
+
+[acme]
+# CHANGE. Where Google Trust Services sends certificate expiry notices.
+contact_email = "ops@example.com"
+# Internal clusters (ingress = "internal"): certificates from your own CA
+# instead (`./boxd-install providers set-tls-ca <cert.pem> <key.pem>`):
+# ca = "local"
+# dns_verify_resolver = "10.60.0.2"
+
+[license]
+# Without a key: the free tier, 16 worker vCPUs in all. On GKE a worker pool
+# over the limit is refused by validate (nodes x the machine type's vCPUs).
+# key_file = "license.key"
+
+[telemetry]
+# enabled = false                        # only with a license key that has telemetry opt-out
+
+# ==================================================================== 2. GKE
+
+[gke]
+# "create": the installer creates a GKE Standard cluster (VPC-native, private
+# nodes behind Cloud NAT, the Regular channel with node upgrades held by a
+# maintenance exclusion, Secrets encrypted with a Cloud KMS key). Or bring a
+# Standard cluster of yours (legacy dataplane, GKE 1.28.4 or later):
+# cluster = "projects/my-gcp-project/locations/europe-west4/clusters/platform"
+cluster = "create"
+# boxd's namespace. Pod Security there is set to privileged (workers and
+# edges are privileged and on the host network).
+namespace = "boxd"
+# One zone, or three for a regional cluster: control and the edges spread
+# over them; workers stay in the first.
+zones = ["europe-west4-a"]
+# cluster = "create" only. Who may reach the GKE control plane: the
+# installer's address must be among them.
+admin_cidrs = ["203.0.113.4/32"]         # CHANGE
+# Raft voters: 1 or 3. 3 keeps the cluster up when a node goes; it can't be
+# changed after the first apply.
+control_replicas = 3
+
+# The host kernel on workers.
+#   "boxd"  (default) boxd's host kernel, put on each new worker node by the
+#           node-prep DaemonSet (one reboot): forks of running machines carry
+#           their RAM and start in milliseconds. Needs Secure Boot off on the
+#           worker pool; Google does not support nodes on another kernel.
+#           `validate` refuses it under an org policy that requires Shielded
+#           VM (constraints/compute.requireShieldedVm).
+#   "stock" GKE's Ubuntu kernel, Secure Boot on: a fork of a running machine
+#           snapshots it first (a longer pause of the source); everything
+#           else is the same.
+host_kernel = "boxd"
+
+# "public" puts each edge behind an external passthrough load balancer on a
+# static IP (every port boxd serves: 80, 443, 9443, 53, SSH 10000-30000,
+# exposed ports 40000-60000). "internal" uses internal ones in the VPC,
+# reached over your VPN or interconnect: set [acme] ca = "local", and forward
+# the zone to boxd-dns on your resolvers (apply prints how).
+ingress = "public"
+# internal_ips = ["10.60.0.250", "10.60.0.251"]   # internal only; one per edge, default: any free
+
+# cluster = "create" only. The nodes' subnet (inside 10/8), and GKE's pod and
+# service ranges, outside 10/8: the machines' pool is in there ([network]).
+vpc_cidr      = "10.60.0.0/20"
+pods_cidr     = "172.20.0.0/16"
+services_cidr = "172.24.0.0/20"
+
+# Cloud Logging of workloads, Managed Service for Prometheus scraping every
+# boxd role, and a Cloud Monitoring dashboard. false turns all three off.
+observability = true
+# ClickHouse for the console's usage graphs (each machine's CPU, memory and disk
+# over time), as the metrics node on the other targets: one pod on the system
+# pool, its data on a pd-ssd disk of analytics_disk_gb, fixed once created.
+# false runs none: set [analytics] to a ClickHouse of yours, or go without the
+# graphs. An [analytics] of yours wins over it either way.
+analytics = true
+# analytics_disk_gb = 100
+
+[gke.pools.system]                       # control, console and ClickHouse
+machine_type = "e2-standard-4"
+nodes = 3                                # at least control_replicas; a multiple of the zones
+
+[gke.pools.edge]                         # one proxy + one dns per node, each node its own IP
+machine_type = "n2-standard-4"
+nodes = 2                                # edges can be added, not removed
+
+[gke.pools.worker]                       # one boxd worker per node
+# Nested virtualization: Intel N2 (recommended), N1, C2 or C3. AMD, Arm and
+# E2 can't boot VMs.
+machine_type = "n2-standard-16"
+nodes = 1                                # pools never autoscale; apply drains a worker it removes
+# Local NVMe SSDs per node, made one RAID 0 by node-prep: the worker's data
+# dir (in bucket mode a cache: a machine's disk lives in the bucket). 0 gives
+# each worker a pd-balanced disk of data_disk_gb instead (wakes and starts
+# are then bound by its throughput).
+local_ssd = 4
+# data_disk_gb = 500
+
+# ================================================================= 3. OPTIONAL
+
+[images]
+# Where the cluster pulls boxd's images (boxd, boxd-node-prep, boxd-dockerd)
+# and the VM image. Default: boxd's registry. A cluster without internet
+# access mirrors them into its own (Artifact Registry in this project works
+# through the nodes' service accounts):
+# registry = "europe-west4-docker.pkg.dev/my-gcp-project/boxd"
+# An existing kubernetes.io/dockerconfigjson Secret in the namespace, for the
+# pods and for the workers' own pulls of VM images:
+# pull_secret = "boxd-pull"
+
+# Bucket storage — machines' disks in a bucket the installer creates, so
+# they can move between workers (live migration, drains). Needs a license
+# key with bucket-storage.
+# [storage_engine]
+# default_vm_storage = "bucket"
+
+# [templates]
+# sizes = [
+#     { vcpu = 1, memory_gb = 4 },
+#     { vcpu = 2, memory_gb = 8 },
+#     { vcpu = 4, memory_gb = 16 },
+# ]
+
+# [oidc]                                  # single sign-on, as on the other targets
+# issuer = "https://login.microsoftonline.com/<tenant-id>/v2.0"
+# client_id = "…"
+# display_name = "Contoso"
+# bootstrap_admin = "you@yourcompany.com"
+
+# ============================================================== 4. LEAVE AS IS
+
+[network]
+mode = "routed"                          # the only mode on GKE: Geneve between nodes
+pool = "10.120.0.0/16"                   # machines' addresses; guests keep a 1500 MTU on an 8896 VPC
+
+[control]
+default_auto_suspend_secs = 900
+default_auto_hibernate_secs = 1800
+
+[worker]
+warm_slots = 2
+nested_virt = false                      # KVM inside users' VMs; see the GCE example
+
+[proxy]
+ssh_port = 2222                          # the edge node's own sshd holds 22
+http_port = 80
+https_port = 443
+api_port = 9443
+
+[names]
+reserved = [
+    "api", "app", "www", "mail", "git", "ssh", "proxy", "ns1", "ns2",
+    "console", "connect", "docs", "help", "support", "status", "admin",
+    "grafana",
+]

@@ -697,13 +697,22 @@ def glue_records(cfg, renderer: Renderer) -> str:
     return "\n".join(lines)
 
 def private_dns_setup(cfg, renderer: Renderer) -> str:
-    """Private ingress has no registrar glue: the zone is only reachable
-    inside the VPC, so resolvers that clients use must forward it to boxd-dns."""
+    """Private ingress (AWS) or internal ingress (GKE) has no registrar glue:
+    the zone is only reachable inside the VPC, so resolvers that clients use
+    must forward it to boxd-dns."""
     ns = sorted(renderer._ns_map().items())
     ips = ", ".join(renderer._advertised_ip(node) for _, node in ns)
     lines = [f"DNS setup for private ingress ({cfg.zone} is served only inside the VPC):",
              "  boxd-dns nodes (authoritative for the zone):"]
     lines += [f"    {slot}  {renderer._advertised_ip(node)}" for slot, node in ns]
+    if clouds.kubernetes(cfg):
+        # GKE, ingress = "internal": internal passthrough load balancers.
+        lines += [f"  Conditional forwarder: {cfg.zone} -> {ips}",
+                  "    on your corporate DNS, or a Cloud DNS private forwarding zone for",
+                  f"    {cfg.zone} in the networks your clients resolve from (VPN, interconnect).",
+                  f"  Clients reach {cfg.zone} and *.{cfg.zone} at those internal load balancer",
+                  "    addresses, through your VPN or interconnect."]
+        return "\n".join(lines)
     lines += [f"  Conditional forwarder: {cfg.zone} -> {ips}",
               "    on your corporate DNS, a Route 53 Resolver outbound rule, or the",
               "    Twingate connector host's resolver.",

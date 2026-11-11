@@ -15,6 +15,7 @@ installer downloads and checks before it installs them. The installer is open
 source; the binaries have their own license (see [License](#license)).
 
 [Install on GCP](docs/INSTALL.md#install-on-gcp)
+| [Install on GKE](docs/INSTALL.md#install-on-gke)
 | [Install on AWS](docs/INSTALL.md#install-on-aws)
 | [Install on bare metal](docs/INSTALL.md#install-on-bare-metal)
 | [Reference](docs/REFERENCE.md)
@@ -28,6 +29,7 @@ Choose the cloud you already use, or bring your own hosts.
 | Run it on | You need | The command | Install |
 |-----------|----------|-------------|---------|
 | GCP | a Google Cloud project with billing | `./boxd-install apply` | [Install on GCP](docs/INSTALL.md#install-on-gcp) |
+| GKE | a Google Cloud project; the installer creates a GKE Standard cluster, or uses yours | `./boxd-install apply` | [Install on GKE](docs/INSTALL.md#install-on-gke) |
 | AWS | an AWS account | `./boxd-install apply` | [Install on AWS](docs/INSTALL.md#install-on-aws) |
 | Bare metal | Ubuntu 24.04 hosts you prepare: ssh, a private network, KVM on workers | `./boxd-install apply` | [Install on bare metal](docs/INSTALL.md#install-on-bare-metal) |
 
@@ -134,8 +136,9 @@ put it in a file next to `cluster.toml` and run `apply` again.
 
 ## Limitations
 
-- **GCP, AWS or hosts you prepare.** On GCP and AWS a cluster runs in one
-  zone of one region. On [bare metal](docs/INSTALL.md#install-on-bare-metal)
+- **GCP, GKE, AWS or hosts you prepare.** On GCP and AWS a cluster runs in one
+  zone of one region; on [GKE](docs/INSTALL.md#install-on-gke) control and the
+  edges can spread over a region's zones, and workers stay in one. On [bare metal](docs/INSTALL.md#install-on-bare-metal)
   the installer creates nothing: you provide Ubuntu 24.04 hosts with ssh, a
   private network inside `10.0.0.0/8`, public IPs for the proxy and dns
   nodes, and KVM and a data disk on workers.
@@ -156,11 +159,11 @@ put it in a file next to `cluster.toml` and run `apply` again.
 
 | File | What it's for |
 |---|---|
-| [`docs/INSTALL.md`](docs/INSTALL.md) | the install, step by step, on GCP, AWS or bare metal |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | the install, step by step, on GCP, GKE, AWS or bare metal |
 | [`docs/REFERENCE.md`](docs/REFERENCE.md) | configuration, upgrades, day-2 operations, troubleshooting |
 | [`OPERATIONS.md`](OPERATIONS.md) | running the cluster day to day (`boxd-ctl`) |
 | [`INSTALL-PROMPT.md`](INSTALL-PROMPT.md) | the same install, with Claude Code |
-| `cluster.example.toml`, `examples/{gcp,aws,metal}/cluster.toml` | your starting config; copy it to `cluster.toml`, which git ignores |
+| `cluster.example.toml`, `examples/{gcp,gke,aws,metal}/cluster.toml` | your starting config; copy it to `cluster.toml`, which git ignores |
 | [`SECURITY.md`](SECURITY.md) | how to report a security problem |
 
 ## Contributing

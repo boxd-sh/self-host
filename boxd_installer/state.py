@@ -64,7 +64,10 @@ class State:
 
     def allocate(self, cfg) -> "Allocation":
         ids: dict = self.data.setdefault("node_ids", {})
-        next_id = max([0] + [v for v in ids.values()]) + 1
+        # A retired id (retire_node_id) is never handed out again: a Raft
+        # learner removed under an id must not come back under it.
+        retired = self.data.get("retired_node_ids", [])
+        next_id = max([0] + [v for v in ids.values()] + list(retired)) + 1
         for role in ROLE_ID_ORDER:
             for node in cfg.nodes_with(role):
                 key = f"{node.name}/{role}"
@@ -88,6 +91,20 @@ class State:
 
         self.save()
         return Allocation(cfg, ids, vnis, bridges)
+
+    def retire_node_id(self, key: str) -> int | None:
+        """Forget the id of `<node name>/<role>` for good (a GKE worker whose
+        ordinal was removed): the name gets a new id if it comes back, and no
+        one gets this one. Returns the retired id, None when there was none."""
+        ids: dict = self.data.setdefault("node_ids", {})
+        if key not in ids:
+            return None
+        node_id = ids.pop(key)
+        retired = self.data.setdefault("retired_node_ids", [])
+        if node_id not in retired:
+            retired.append(node_id)
+        self.save()
+        return node_id
 
     def _secret_file(self, name: str, generate) -> str:
         path = os.path.join(self.keys_dir, name)

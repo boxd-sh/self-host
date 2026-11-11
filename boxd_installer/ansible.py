@@ -1,6 +1,11 @@
 """Converge via the vendored ansible tree, and post-install steps over ssh
 (through the same tunnel ansible uses: IAP on GCP, SSM on AWS; direct on
-metal)."""
+metal).
+
+Every boxd-ctl call goes through ctl_on: `sudo boxd-ctl` over ssh on a
+control host, or on Kubernetes ([gke]) `kubectl exec` into that control pod
+(kube.ctl). The few probes that read a host (logs, deployed files) have a
+Kubernetes twin in kube.py, picked at the top of each function."""
 import atexit
 import json
 import os
@@ -172,11 +177,18 @@ def _ssh_opts(cfg) -> list[str]:
                      "-o", "ConnectTimeout=30",
                      "-i", os.path.join(_keys_dir, "boxd-deploy")]
 
+def _kube():
+    from . import kube
+    return kube
+
 def deployed_network_modes(cfg) -> dict[str, str]:
     """Each worker's [network] mode as its /etc/boxd/worker.toml has it
     ("bridge" when the file names none); workers without the file (new ones)
-    are left out. Read and parsed here, so nothing on the host needs to."""
+    are left out. Read and parsed here, so nothing on the host needs to.
+    Kubernetes runs routed only: nothing to switch from."""
     import tomllib
+    if clouds.kubernetes(cfg):
+        return {}
     out = {}
     for node in cfg.nodes_with("worker"):
         res = _ssh(cfg, node, "sudo cat /etc/boxd/worker.toml",
@@ -196,6 +208,8 @@ def deployed_bucket_identities(cfg) -> dict[str, dict]:
     the file is parsed here and only those fields are kept. Workers without
     the file are left out."""
     import tomllib
+    if clouds.kubernetes(cfg):
+        return _kube().deployed_bucket_identities(cfg)
     out = {}
     for node in cfg.nodes_with("worker"):
         res = _ssh(cfg, node, "sudo cat /etc/boxd/bucket.toml",
@@ -215,6 +229,8 @@ def worker_bucket_line(cfg, node) -> str:
     opened, bucket mode off, or a build without the engine refusing its
     config (""; nothing yet). Scoped to the systemd invocation, so an older
     process's line never counts."""
+    if clouds.kubernetes(cfg):
+        return _kube().worker_bucket_line(cfg, node)
     res = _ssh(cfg, node,
                "sudo journalctl -q --no-pager -o cat _SYSTEMD_INVOCATION_ID="
                "$(systemctl show -p InvocationID --value boxd-worker) "
@@ -241,7 +257,10 @@ def worker_egress_ca(cfg) -> tuple[str, str, str] | None:
     egress CA, or None. A cluster from before the installer shipped one: its
     machines trust their worker's pair, so adopting one keeps that worker's
     machines working (the others' re-fetch the CA at their next boot,
-    restore or fork)."""
+    restore or fork). On Kubernetes every worker has had the installer's
+    pair from its first start."""
+    if clouds.kubernetes(cfg):
+        return None
     for node in cfg.nodes_with("worker"):
         got = []
         for f in ("egress-ca.pem", "egress-ca.key"):
@@ -263,16 +282,28 @@ def worker_vcpus(cfg) -> dict[str, int]:
         out[n.name] = int(res.stdout.strip())
     return out
 
-def ctl(cfg, command: str, check: bool = True, quiet: bool = False):
+def ctl_on(cfg, node, command: str, check: bool = True, quiet: bool = False,
+           input: str | None = None):
+    """`boxd-ctl <command>` on one control node: over ssh as root, or on
+    Kubernetes in that node's control pod. `command` is shell-quoted (the
+    pod's exec splits it with shlex); `input` goes to its stdin, never logged."""
+    if clouds.kubernetes(cfg):
+        return _kube().ctl(cfg, node, command, check=check, quiet=quiet, input=input)
+    kw = {"input": input} if input is not None else {}
+    return _ssh(cfg, node, f"sudo boxd-ctl {command}", capture=True, check=check, quiet=quiet, **kw)
+
+def ctl(cfg, command: str, check: bool = True, quiet: bool = False, input: str | None = None):
     """Run boxd-ctl on ONE control node (parallel connections trip its rate limit)."""
-    host = cfg.nodes_with("control")[0]
-    return _ssh(cfg, host, f"sudo boxd-ctl {command}", capture=True, check=check, quiet=quiet)
+    return ctl_on(cfg, cfg.nodes_with("control")[0], command, check=check, quiet=quiet,
+                  input=input)
 
 def acme_eab_spent(cfg) -> bool:
     """True when the running boxd-control can't register its ACME account
     because Google Trust Services already consumed the single-use EAB key
     (an earlier process used it and died before saving the account). Only
     the current process's log counts, so a recovered cluster reads clean."""
+    if clouds.kubernetes(cfg):
+        return _kube().acme_eab_spent(cfg)
     host = cfg.nodes_with("control")[0]
     probe = ("pid=$(systemctl show -p MainPID --value boxd-control); "
              "sudo journalctl -u boxd-control _PID=$pid --no-pager -o cat | "
@@ -313,7 +344,7 @@ def leader_node(cfg, timeout: int = 120):
     deadline = time.time() + timeout
     while True:
         for node in cfg.nodes_with("control"):
-            res = _ssh(cfg, node, "sudo boxd-ctl status", capture=True, check=False, quiet=True)
+            res = ctl_on(cfg, node, "status", check=False, quiet=True)
             if res.returncode == 0 and _is_leader(res.stdout):
                 return node
         if time.time() >= deadline:
@@ -330,7 +361,7 @@ def sync_config(cfg) -> list[str]:
     new it prints "No new learners to add" (members are re-proposed, a raft
     no-op). Returns the "Added …" lines."""
     leader = leader_node(cfg)
-    res = _ssh(cfg, leader, "sudo boxd-ctl sync-config", capture=True, check=False, quiet=True)
+    res = ctl_on(cfg, leader, "sync-config", check=False, quiet=True)
     if res.returncode != 0:
         raise InstallError(f"`boxd-ctl sync-config` on {leader.name} failed:\n"
                            f"{((res.stderr or '') + (res.stdout or '')).strip()[-800:]}")
@@ -348,7 +379,9 @@ def learners_gave_up(cfg) -> list[str]:
     logs "registration failed, retrying" meanwhile, which isn't giving up.
     Workers show up in `boxd-ctl status`; proxies don't, so the node count
     alone can't see them. Scoped to the systemd invocation, so a healthy
-    re-apply restarts nothing."""
+    re-apply restarts nothing (on Kubernetes: the current container's log)."""
+    if clouds.kubernetes(cfg):
+        return _kube().learners_gave_up(cfg)
     failed = []
     for role, unit in _LEARNER_UNITS:
         for node in cfg.nodes_with(role):
@@ -365,6 +398,9 @@ def restart_learners(cfg) -> None:
     """Fresh-cluster fixup: learners exhaust registration retries before the
     first leader exists; restart them once. A green converge does NOT imply a
     registered cluster (METAL_DEPLOYMENT.md)."""
+    if clouds.kubernetes(cfg):
+        _kube().restart_learners(cfg)
+        return
     for role, unit in _LEARNER_UNITS:
         for node in cfg.nodes_with(role):
             _ssh(cfg, node, f"sudo systemctl restart {unit}", check=False)
@@ -422,6 +458,11 @@ def seed_templates(cfg, image: str, tag: str, assets_sha: str, timeout: int = 12
             listing = ctl(cfg, "template list", check=False).stdout or ""
             if _ready(listing, name):
                 break
+            if _failed(listing, name):
+                raise InstallError(
+                    f"template {name} failed to build — default image NOT changed; creates keep "
+                    "using the previous image. The builder worker's log says why (search for the "
+                    f"template's name); `boxd-ctl template delete` it, then apply again")
             time.sleep(15)
         else:
             raise InstallError(f"template {name} did not reach ready — default image "
@@ -540,9 +581,7 @@ def install_license(cfg, key_path: str) -> None:
     reason. Installing the same key again changes nothing."""
     with open(key_path) as fh:
         key = fh.read()
-    host = cfg.nodes_with("control")[0]
-    res = _ssh(cfg, host, "sudo boxd-ctl license install", capture=True, check=False,
-               input=key)
+    res = ctl(cfg, "license install", check=False, input=key)
     if res.returncode == 0:
         state = next((line.split(":", 1)[1].strip() for line in res.stdout.splitlines()
                       if line.startswith("license:")), "installed")
@@ -623,6 +662,10 @@ def _template_names(listing: str) -> set[str]:
 
 def _ready(listing: str, name: str) -> bool:
     return any(cols[1] == name and "ready" in cols[2:] for cols in _template_rows(listing))
+
+def _failed(listing: str, name: str) -> bool:
+    """The template's build failed: it never becomes ready, so waiting longer is pointless."""
+    return any(cols[1] == name and "failed" in cols[2:] for cols in _template_rows(listing))
 
 def _template_id(listing: str, name: str) -> str:
     for cols in _template_rows(listing):

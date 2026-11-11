@@ -122,7 +122,10 @@ def show_json(cfg, plan_path: str) -> str:
     return _tf(cfg, "show", "-json", os.path.abspath(plan_path),
                capture=True, quiet=True).stdout
 
-def apply_plan(cfg, plan_path: str) -> None:
+def apply_plan(cfg, plan_path: str, before=None) -> None:
+    """Apply the plan; `before()` runs first (the installer's state checkpoint)."""
+    if before is not None:
+        before()
     _tf(cfg, "apply", "-input=false", os.path.abspath(plan_path))
 
 def destroy(cfg, tfvars_path: str) -> None:
@@ -161,6 +164,11 @@ def cached_outputs(state, fake_path: str | None = None) -> dict:
     return out
 
 def _check(out: dict) -> None:
+    if "gke" in out:
+        # terraform/gke: pods, not instances.
+        log(f"terraform outputs: GKE cluster {(out['gke'] or {}).get('name')}, "
+            f"{len(out.get('edges') or [])} edge(s)")
+        return
     if "nodes" not in out:
         raise InstallError("terraform outputs missing 'nodes'")
     log(f"terraform outputs: {len(out['nodes'])} nodes")

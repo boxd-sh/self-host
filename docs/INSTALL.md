@@ -1,9 +1,9 @@
-# Install boxd on GCP, AWS or bare metal
+# Install boxd on GCP, GKE, AWS or bare metal
 
 Read [Before you start](#before-you-start), then follow **one** walkthrough
 from top to bottom: [Install on GCP](#install-on-gcp),
-[Install on AWS](#install-on-aws) or
-[Install on bare metal](#install-on-bare-metal). All three end in
+[Install on GKE](#install-on-gke), [Install on AWS](#install-on-aws) or
+[Install on bare metal](#install-on-bare-metal). All four end in
 [After apply: delegate DNS and check](#after-apply-delegate-dns-and-check).
 Run every command from the root of this repository. Configuration, day-2
 operations and troubleshooting are in [REFERENCE.md](REFERENCE.md).
@@ -30,14 +30,14 @@ You need:
 ### How `./boxd-install` works
 
 `./boxd-install` runs `./install.py` inside a Docker image that carries every
-tool the installer uses (terraform, ansible, gcloud, the aws CLI with the
-Session Manager plugin, ssh, openssl) at tested versions. The first run pulls
+tool the installer uses (terraform, ansible, gcloud with kubectl, the aws CLI
+with the Session Manager plugin, ssh, openssl) at tested versions. The first run pulls
 it from `ghcr.io/boxd-sh/self-host-tools` (about 1.8 GB). If it can't
 be pulled, it's built locally from `docker/`, once, in a few minutes.
 
 ```sh
 ./boxd-install validate                 # = ./install.py validate, and so on
-./boxd-install gcloud …                 # gcloud, aws, terraform, ansible, ssh: that tool
+./boxd-install gcloud …                 # gcloud, aws, terraform, ansible, ssh, kubectl: that tool
 ./boxd-install shell                    # a shell inside the image
 ```
 
@@ -58,7 +58,9 @@ be pulled, it's built locally from `docker/`, once, in a few minutes.
   the `ansible.posix` collection, `python3` (>= 3.11), OpenSSL 3 (`openssl`:
   it checks the signature of every boxd release; macOS ships LibreSSL, which
   cannot, so `brew install openssl@3` and put it first in `PATH`) and your
-  cloud's CLI (on AWS also the Session Manager plugin), then use
+  cloud's CLI (on AWS also the Session Manager plugin; on GKE also `kubectl`
+  and `gke-gcloud-auth-plugin`, e.g. `gcloud components install kubectl
+  gke-gcloud-auth-plugin`), then use
   `./install.py` wherever this guide says `./boxd-install`. VS Code users can
   open the repo in its dev container, which uses the same image.
 
@@ -226,6 +228,125 @@ for `contact_email` through your project's Public CA API and keeps it in the
 encrypted state. There's nothing to set up. Inside a corporate network
 certificates can come from your own CA instead: see
 [TLS from your own CA](REFERENCE.md#tls-from-your-own-ca).
+
+Continue with [After apply: delegate DNS and check](#after-apply-delegate-dns-and-check).
+
+---
+
+## Install on GKE
+
+boxd on **Google Kubernetes Engine**: the installer runs boxd's roles as pods
+on dedicated node pools, in a GKE Standard cluster it creates or in one you
+already run. Everything else (the console, the CLI, DNS delegation, the
+license) is as on Compute Engine. The keys and requirements are in
+[GKE](REFERENCE.md#gke).
+
+Example names used below: project `my-project`, region `europe-west4`,
+cluster `mycluster`, zone `boxd.example.com`. Use your own.
+
+### 1. Sign in to GCP for GKE
+
+As in [Install on GCP](#1-sign-in): `./boxd-install gcloud auth login`,
+`auth application-default login`, `config set project` and
+`auth application-default set-quota-project`. The installer talks to the
+cluster with `kubectl` from the same image, as that account; it keeps its
+own kubeconfig and never touches yours.
+
+### 2. Check the project for GKE
+
+- **Billing**, and **Owner** on the project (the installer enables the APIs
+  it needs: Kubernetes Engine, Compute, IAM, Storage, Public CA, Artifact
+  Registry, Cloud KMS, Monitoring, Logging).
+- **Quota:** the example needs 3 `e2-standard-4` system nodes (12 E2
+  vCPUs), 2 `n2-standard-4` edge nodes and one `n2-standard-16` worker with
+  4 local SSDs (24 N2 vCPUs, 1.5 TB of local SSD), 2 static external IPs and
+  2 forwarding rules. Check `N2_CPUS`, `E2_CPUS`, `LOCAL_SSD_TOTAL_GB`,
+  `IN_USE_ADDRESSES` and `FORWARDING_RULES` in your region:
+
+  ```sh
+  ./boxd-install gcloud compute regions describe europe-west4 \
+      --flatten=quotas --format='table(quotas.metric,quotas.limit,quotas.usage)' \
+      | grep -E 'N2_CPUS|E2_CPUS|LOCAL_SSD|IN_USE_ADDRESSES|FORWARDING_RULES'
+  ```
+- **Org policy:** with the default `host_kernel = "boxd"`, worker nodes run
+  with Secure Boot off. If your organization enforces
+  `constraints/compute.requireShieldedVm`, `validate` says so: set
+  `host_kernel = "stock"` ([Host kernel](REFERENCE.md#host-kernel-and-secure-boot)).
+- **Your own cluster** (`cluster = "projects/…/clusters/…"`): GKE Standard
+  (not Autopilot), 1.28.4 or later, the legacy dataplane (not Dataplane V2),
+  VPC-native, nodes in `10.0.0.0/8`, and Managed Service for Prometheus on
+  unless you set `observability = false`. You need to reach its control
+  plane from where you run the installer. `validate` checks all of it and
+  says what to change.
+
+### 3. Secrets for GKE
+
+Create `~/.boxd-mycluster.env` as in [Your state key](#your-state-key), and
+`source` it.
+
+### 4. State bucket for GKE
+
+As in [Install on GCP](#4-state-bucket).
+
+### 5. `cluster.toml` for GKE
+
+```sh
+cp examples/gke/cluster.toml cluster.toml
+```
+
+Change every value marked `CHANGE`: the cluster name (at most 22
+characters), zone, project, region, state bucket, the certificate contact
+email, and `admin_cidrs`, the addresses that may reach the cluster's control
+plane (yours among them: `curl -s https://ifconfig.me`). To install into a
+cluster you run, set `cluster` to its resource name and remove `admin_cidrs`,
+`vpc_cidr`, `pods_cidr` and `services_cidr`: they are read from it. Then:
+
+```sh
+./boxd-install validate
+```
+
+On GKE, `validate` reads the project too: the org policy and, for your own
+cluster, its version, dataplane, ranges, MTU and Private Google Access. It
+also refuses a worker pool over the license: without a key, 16 worker vCPUs
+in all (`nodes` × the machine type's vCPUs). Pools never autoscale; their
+size is `nodes`.
+
+**Worker machine types need nested virtualization**: Intel N2 (recommended),
+N1, C2 or C3. AMD, Arm and E2 can't boot VMs.
+
+### 6. Console sign-in on GKE
+
+As in [Install on GCP](#6-console-sign-in-google), or
+[Single sign-on](REFERENCE.md#single-sign-on-oidc).
+
+### 7. Apply on GKE
+
+```sh
+./boxd-install apply 2>&1 | tee apply.log
+```
+
+About 30 minutes on a new cluster: download and verify the release →
+terraform (the network and the GKE cluster with `cluster = "create"`, then
+boxd's node pools, each edge's static IP and load balancer, firewall rules,
+buckets, the monitoring dashboard) → the Kubernetes objects: ClickHouse for
+the usage graphs and its schema, control, then the console, then each edge
+(proxy and dns), then the workers (node prep
+puts boxd's host kernel on each new worker node and reboots it once, then
+builds the local SSD RAID) → membership and registration → license, storage
+switches, templates. It ends by printing the `Assets:` version and the glue
+records: one nameserver per edge.
+
+Check the pods with `kubectl` from the same image:
+
+```sh
+./boxd-install gcloud container clusters get-credentials mycluster \
+    --location europe-west4-a --project my-project
+./boxd-install kubectl -n boxd get pods -o wide
+./boxd-install ctl -- status                 # boxd-ctl, in the control-0 pod
+```
+
+With `ingress = "internal"`, `apply` prints the conditional forwarder to set
+up instead of glue records ([Internal ingress](REFERENCE.md#internal-ingress)).
 
 Continue with [After apply: delegate DNS and check](#after-apply-delegate-dns-and-check).
 
@@ -740,7 +861,9 @@ At your DNS provider, in the **parent** zone (`example.com`), add:
   nameservers inside the zone they serve.
 
 With private ingress, `apply` prints a conditional-forwarder setup instead:
-see [Private ingress on AWS](#private-ingress-on-aws).
+see [Private ingress on AWS](#private-ingress-on-aws), or on GKE
+[Internal ingress](REFERENCE.md#internal-ingress). On GKE there is one
+nameserver per edge, each on its own load balancer IP.
 
 **2. Wait for it, then for certificates.**
 
