@@ -181,6 +181,95 @@ proxies' device ingress and the internet. They can't reach the hosts'
 other ports, the VPC or other private ranges, or the cloud metadata service.
 `boxd-worker` won't start without the firewall's tables loaded.
 
+### Private services
+
+Boxes can't reach the VPC or any other private address. To let them call a
+service there (an internal load balancer, a database), declare it: boxes then
+reach that service, by its own hostname and port, and nothing else of the
+private network.
+
+```toml
+# A load balancer whose addresses change (an AWS internal ALB): the name is
+# resolved on the worker hosts, and only addresses in these subnets are used.
+[[worker.private_services]]
+name           = "platform.internal.example.com"
+port           = 443
+target_subnets = ["10.80.1.0/24", "10.80.2.0/24"]
+
+# A service on one fixed address; the name doesn't have to exist in DNS.
+[[worker.private_services]]
+name   = "db.internal.example.com"
+port   = 5432
+target = "10.80.1.50"
+
+[network]
+# service_range = "198.18.0.0/24"   # optional; this is the default
+```
+
+How it works: a box resolves the name through its gateway (the worker's
+resolver) and gets a **service address** from `service_range`, the same on
+every worker. Its connection to that address and port goes to a relay on
+the gateway (`boxd-relay`, a systemd unit of its own on each worker, user
+`boxd-relay`, no privileges), which connects onward **from the worker
+host**. TLS runs end to end between the box and the service. A box that
+dials the target's real address is still dropped.
+
+- **`name`** is a fully qualified hostname, compared without case. A name
+  may be declared on several ports, one table each, and two names may share
+  a port.
+- **`port`** is the port boxes dial and the target's port.
+- **`target`** (one IPv4) or **`target_subnets`** (IPv4 CIDRs, none wider
+  than `/20`), exactly one. With `target_subnets` the worker hosts resolve
+  `name` with their own resolver (the VPC's), every 5 seconds, and use only
+  the addresses inside the subnets. For a load balancer, give the subnets
+  it is attached to. Whoever controls that DNS record can point boxes at any
+  host in those subnets, on that port, so keep them narrow.
+- Targets may not hold a node's address, overlap the box network
+  (`bridge_subnet_base`'s `/16`s or the routed `pool`) or `service_range`,
+  or be loopback, link-local or multicast.
+- **`service_range`** must be a `/16` to `/24` inside `198.18.0.0/15`,
+  `172.16.0.0/12`, `192.168.0.0/16` or `100.64.0.0/10`. Boxes can't use
+  these addresses for anything else. Pick another block if your network
+  uses this one.
+- **Service addresses are the installer's.** It allocates one per name and
+  remembers it in its state: a name keeps its address for good, and an
+  address is never given to another name, because boxes and their snapshots
+  hold it. Don't write `address` yourself. `./boxd-install state
+  reset-service-addresses` starts the allocation over (boxes get the new
+  addresses on their next lookup).
+- A release from before this feature is refused: its workers would ignore
+  the tables.
+
+What to know before you use it:
+
+- **The service sees the worker's address, not the box's.** Untrusted code
+  shares a box with whatever is meant to call the service, so the service
+  must authenticate every caller itself. Its firewall (a security group on
+  AWS) must admit the workers.
+- **A box must resolve the name through its gateway.** A box using another
+  resolver (its own `8.8.8.8`, DNS over HTTPS, Tailscale split DNS for the
+  same domain) gets the real address, which is dropped. If you used
+  Tailscale in boxes to reach the service, remove its split DNS for the
+  domain.
+- **Isolated boxes never reach a private service.** A box with an egress
+  allowlist reaches one only if its allowlist names the service's hostname
+  (a wildcard counts); `none` reaches none.
+- **A refused connection looks like a connect, then a reset**, whatever the
+  reason (no address answered, the box may not use it). The reason is in the
+  relay's log. An isolated box's connect times out instead, and a stopped
+  relay gives "connection refused".
+- **The relay doesn't keep a box awake.** A box holding an idle connection
+  suspends and hibernates on its timers; what the service sends wakes a
+  suspended box. A hibernated box's connections are closed. A box that must
+  sleep while the service keeps sending needs `idle.ignore-outbound`.
+- TCP only. A restart of the relay itself (its upgrade, a crash) cuts its
+  open connections; clients reconnect a second later. Worker restarts and
+  deploys don't.
+- Not on `[gke]` yet.
+
+Not to be confused with `[[proxy.internal_services]]`, which is the other
+direction: it routes ingress from users to your own internal services.
+
 ### License key
 
 Without a license key, a boxd cluster has the **free tier**: its workers may
@@ -1082,6 +1171,8 @@ while it is off.
   RAM; size the worker type for the machines it holds. Under node memory
   pressure the kubelet evicts pods, and a worker's machines go with it.
 - Shared VPC, Dataplane V2 and Autopilot are not supported.
+- `[[worker.private_services]]` is not supported (the relay needs a systemd unit on
+  the worker host).
 
 ## Day-2 operations
 
