@@ -67,6 +67,15 @@ class Validation(unittest.TestCase):
         self.assertIn("IPv4", validate(with_services({**DB, "target": "fd00::1"})))
         self.assertIn("non-empty list", validate(with_services({**ALB, "target_subnets": []})))
 
+    def test_target_subnets_in_the_form_boxd_parses(self):
+        # Python reads a netmask or a hostmask; boxd's Ipv4Cidr only a prefix length, so the
+        # worker would refuse its worker.toml.
+        for form in ("10.70.8.0/255.255.255.0", "10.70.8.0/0.0.0.255"):
+            self.assertIn(f"write '{form}' as 10.70.8.0/24",
+                          validate(with_services({**ALB, "target_subnets": [form]})), form)
+        self.assertEqual(validate(with_services({**ALB, "target_subnets": ["10.70.8.50"]})), "",
+                         "an address alone is a /32, as in boxd")
+
     def test_targets_that_would_reach_the_cluster(self):
         sub = lambda c: {**ALB, "target_subnets": [c]}  # noqa: E731
         self.assertIn("wider than /20", validate(with_services(sub("10.0.0.0/8"))))
@@ -188,6 +197,12 @@ class Render(unittest.TestCase):
         self.assertIn("[[worker.private_services]]", text)
         self.assertNotIn("service_range", text)
 
+    def test_target_subnets_are_written_in_the_canonical_form(self):
+        doc = with_services({**ALB, "target_subnets": ["10.70.8.50", "10.70.9.0/24"]})
+        worker = tomllib.loads(self.worker_toml(doc))["worker"]
+        self.assertEqual(worker["private_services"][0]["target_subnets"],
+                         ["10.70.8.50/32", "10.70.9.0/24"])
+
     def test_none_declared_renders_nothing(self):
         text = self.worker_toml(aws_doc())
         self.assertNotIn("private_services", text)
@@ -203,6 +218,53 @@ class Render(unittest.TestCase):
         for target in ("10.100.3.4", "10.101.0.9"):
             with self.assertRaisesRegex(InstallError, "overlaps the bridge subnet"):
                 self.worker_toml(with_services({**DB, "target": target}))
+
+class BridgesBeforeTerraform(unittest.TestCase):
+    """A target inside a worker's bridge /16 is refused before terraform, also for the /16 a
+    worker this apply adds would get; nothing is saved."""
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="private-services-bridges-")
+        self.addCleanup(shutil.rmtree, self.dir)
+
+    def state(self, bridges: dict) -> State:
+        st = State(self.dir)
+        st.data["bridge_indexes"] = dict(bridges)
+        st.save()
+        return State(self.dir)
+
+    def two_workers(self, *services) -> config.Config:
+        doc = with_services(*services)
+        doc["nodes"].append({"name": "boxd-aws-demo-worker-1", "roles": ["worker"],
+                             "internal_ip": "10.70.1.11"})
+        return config.Config(doc)
+
+    def test_the_index_a_new_worker_would_get(self):
+        cfg = self.two_workers({**DB, "target": "10.101.3.4"})
+        st = self.state({WORKER: 0})
+        self.assertEqual(st.bridge_indexes_for(cfg), {WORKER: 0, "boxd-aws-demo-worker-1": 1})
+        with self.assertRaisesRegex(InstallError, "10.101.0.0/16 of boxd-aws-demo-worker-1"):
+            main.check_private_service_bridges(cfg, st)
+        self.assertEqual(State(self.dir).data["bridge_indexes"], {WORKER: 0}, "nothing saved")
+        main.check_private_service_bridges(self.two_workers({**DB, "target": "10.70.8.50"}), st)
+
+    def test_a_removed_workers_index_still_counts(self):
+        cfg = config.Config(with_services({**DB, "target": "10.101.3.4"}))
+        with self.assertRaisesRegex(InstallError, "of gone-worker"):
+            main.check_private_service_bridges(cfg, self.state({WORKER: 0, "gone-worker": 1}))
+
+    def test_allocate_gives_the_same_indexes(self):
+        cfg = self.two_workers(ALB)
+        st = self.state({WORKER: 0, "gone-worker": 1})
+        want = st.bridge_indexes_for(cfg)
+        self.assertEqual(want, {WORKER: 0, "gone-worker": 1, "boxd-aws-demo-worker-1": 2})
+        self.assertEqual(st.allocate(cfg).bridge_indexes, want)
+        self.assertEqual(State(self.dir).data["bridge_indexes"], want)
+
+    def test_it_runs_before_terraform(self):
+        import inspect
+        src = inspect.getsource(main._apply)
+        self.assertLess(src.index("check_private_service_bridges(cfg, state)"),
+                        src.index("tf.init(cfg)"))
 
 class ReleaseGate(unittest.TestCase):
     def bundle(self, files: dict) -> str:

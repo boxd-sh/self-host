@@ -10,7 +10,7 @@ import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
                oidc, private_services, remote_state, render, storage_engine, telemetry, tf)
-from .state import State, generate_egress_ca
+from .state import Allocation, State, generate_egress_ca
 from .util import InstallError, log
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -148,6 +148,7 @@ def _apply(cfg, args) -> int:
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     check_storage_bundle(cfg, assets_root)
     check_relay_bundle(cfg, assets_root)
+    check_private_service_bridges(cfg, state)
     # Before terraform: once the storage catalog is on, the engine and its
     # bucket are one-way (storage_engine.check_guard).
     storage = storage_engine.check_guard(cfg, state, assets_root)
@@ -365,6 +366,18 @@ def check_relay_bundle(cfg, assets_root: str) -> None:
             f"and {cfg.assets_version[:12]} is one without it (its manifest lists no "
             "bin/boxd-relay): set [cluster].assets_version to a newer release, or remove the "
             "[[worker.private_services]] tables")
+
+def check_private_service_bridges(cfg, state) -> None:
+    """Before terraform: no private service target inside a worker's bridge /16, the /16s this
+    apply gives new workers included. Found only at render, a new worker's instance would exist
+    and its index be saved, and every later apply would stop there."""
+    declared = private_services.declared(cfg.doc)
+    if not declared or cfg.network_mode == "routed":
+        return
+    alloc = Allocation(cfg, {}, {}, state.bridge_indexes_for(cfg))
+    subnets = {w: alloc.bridge_subnet(w) for w in alloc.bridge_indexes}
+    if why := private_services.bridge_overlap_error(declared, subnets):
+        raise InstallError(why)
 
 def bundle_changes(state, cfg) -> bool:
     """Whether this apply installs another bundle than the last successful

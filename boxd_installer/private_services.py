@@ -24,6 +24,8 @@ WIDEST_TARGET_SUBNET = 20
 NEVER_TARGET = tuple(ipaddress.ip_network(b) for b in (
     "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/3"))
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# What boxd's Ipv4Cidr parses: an address, and a prefix length if any (no netmask form).
+_CIDR = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?")
 
 def canonical(name: str) -> str:
     """The form every lookup compares: lowercase, no trailing dot (boxd's canonical_name)."""
@@ -151,8 +153,12 @@ def validate(doc: dict, errs: list[str], target: str | None) -> None:
                 if not isinstance(subs, list) or not subs or not all(isinstance(x, str) for x in subs):
                     raise ValueError("target_subnets must be a non-empty list of IPv4 CIDRs")
                 for x in subs:
-                    if ipaddress.ip_network(x).version != 4:
+                    net = ipaddress.ip_network(x)
+                    if net.version != 4:
                         raise ValueError(f"target_subnets: {x!r} is not IPv4")
+                    if not _CIDR.fullmatch(x):
+                        raise ValueError(f"target_subnets: write {x!r} as {net} (an address "
+                                         "and a prefix length)")
             bs = bounds(s)
         except ValueError as e:
             errs.append(f"{at}: {e}")

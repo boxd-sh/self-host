@@ -76,22 +76,30 @@ class State:
                     next_id += 1
 
         vnis: dict = self.data.setdefault("vnis", {})
-        bridges: dict = self.data.setdefault("bridge_indexes", {})
         next_vni = max([cfg.network["vni_range_start"] - 1] + list(vnis.values())) + 1
-        next_bridge = max([-1] + list(bridges.values())) + 1
         # Routed: one pool, no per-worker VNI or /16 (those of a cluster that
         # was bridge stay, unused, so going back keeps the old addresses).
         for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
             if node.name not in vnis:
                 vnis[node.name] = next_vni
                 next_vni += 1
-            if node.name not in bridges:
-                bridges[node.name] = next_bridge
-                next_bridge += 1
+        bridges = self.data["bridge_indexes"] = self.bridge_indexes_for(cfg)
 
         services = self.allocate_service_addresses(cfg)
         self.save()
         return Allocation(cfg, ids, vnis, bridges, services)
+
+    def bridge_indexes_for(self, cfg) -> dict:
+        """Every worker's bridge index as allocate() gives them, without saving: the remembered
+        ones (every worker that ever had one, removed ones included) and the next free ones for
+        workers cluster.toml adds, in its order. Routed mode adds none."""
+        bridges = dict(self.data.get("bridge_indexes", {}))
+        next_bridge = max([-1] + list(bridges.values())) + 1
+        for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
+            if node.name not in bridges:
+                bridges[node.name] = next_bridge
+                next_bridge += 1
+        return bridges
 
     def allocate_service_addresses(self, cfg) -> dict:
         """Each private service name's service address (canonical name to address), from

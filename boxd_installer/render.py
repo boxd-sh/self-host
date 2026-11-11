@@ -478,7 +478,8 @@ class Renderer:
             if "target" in s:
                 entry["target"] = s["target"]
             else:
-                entry["target_subnets"] = list(s["target_subnets"])
+                # The canonical form: boxd parses only an address and a prefix length.
+                entry["target_subnets"] = [str(b) for b in private_services.bounds(s)]
             out.append(entry)
         return out
 
