@@ -55,7 +55,7 @@ RUN set -eux; cd /tmp; \
     curl -fsSL -o ssm.deb "https://s3.amazonaws.com/session-manager-downloads/plugin/${SSM_PLUGIN_VERSION}/${s}/session-manager-plugin.deb"; \
     dpkg -i ssm.deb; rm ssm.deb
 
-# gcloud (GCP clusters: IAP tunnels, GCS state, the GTS EAB key). From
+# gcloud (GCP and GKE clusters: IAP tunnels, GCS state, the GTS EAB key). From
 # storage.googleapis.com, not dl.google.com: the latter stalls on some links.
 # The tarball is a complete install; install.sh would only call home for the
 # component list, so it's skipped.
@@ -65,6 +65,15 @@ RUN set -eux; cd /tmp; \
     echo "${sum}  gcloud.tgz" | sha256sum -c -; \
     tar -xzf gcloud.tgz -C /opt; rm gcloud.tgz; \
     CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true /opt/google-cloud-sdk/bin/gcloud version
+
+# kubectl and GKE's credential plugin (GKE clusters: the installer applies
+# boxd's Kubernetes objects and runs boxd-ctl through kubectl exec), at the
+# versions this gcloud release ships.
+RUN CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+       /opt/google-cloud-sdk/bin/gcloud components install --quiet kubectl gke-gcloud-auth-plugin \
+    && rm -rf /opt/google-cloud-sdk/.install/.backup \
+    && /opt/google-cloud-sdk/bin/kubectl version --client \
+    && /opt/google-cloud-sdk/bin/gke-gcloud-auth-plugin --version
 
 # Runs as the caller's uid (files in the mounted repo stay theirs). ssh
 # refuses a uid without a passwd entry, so the entrypoint adds one.

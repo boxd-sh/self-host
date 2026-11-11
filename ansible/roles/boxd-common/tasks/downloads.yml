@@ -1,0 +1,70 @@
+# The CLI's installer, manifests, binaries and skills in /var/lib/boxd/downloads,
+# from the assets bundle and the per-zone files the installer renders. The console
+# serves them at app.<zone>/downloads and the proxy at <zone>/downloads (the URL the
+# console hands out); both roles import this, so every proxy and console node has
+# them, however the roles are spread.
+- name: Ensure the downloads directory
+  file:
+    path: /var/lib/boxd/downloads
+    state: directory
+    owner: "{{ boxd_user }}"
+    group: "{{ boxd_group }}"
+    mode: "0755"
+
+- name: Check for CLI download artifacts
+  stat:
+    path: "{{ boxd_downloads_local_dir | default('') }}/install.sh"
+  delegate_to: localhost
+  become: false
+  register: cli_downloads
+
+- name: Ship CLI download artifacts
+  when: cli_downloads.stat.exists | default(false)
+  block:
+    - name: Ensure downloads/cli directory
+      file:
+        path: /var/lib/boxd/downloads/cli
+        state: directory
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0755"
+
+    - name: Ship install.sh
+      copy:
+        src: "{{ boxd_downloads_local_dir }}/install.sh"
+        dest: /var/lib/boxd/downloads/install.sh
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+
+    - name: Ship CLI manifests + version
+      copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+      with_fileglob:
+        - "{{ boxd_downloads_local_dir }}/cli/*"
+
+    - name: Ship CLI binaries (all platforms)
+      boxd_copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0755"
+      with_fileglob:
+        - "{{ boxd_assets_dir }}/cli/boxd-*"
+
+    - name: Ship CLI skills (optional in the assets zip)
+      copy:
+        src: "{{ item }}"
+        dest: "/var/lib/boxd/downloads/cli/{{ item | basename }}"
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+      with_fileglob:
+        - "{{ boxd_assets_dir }}/cli/skill.md"
+        - "{{ boxd_assets_dir }}/cli/skills.tar.gz"
+

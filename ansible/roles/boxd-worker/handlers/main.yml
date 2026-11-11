@@ -16,9 +16,3 @@
   systemd:
     name: boxd-worker
     state: restarted
-
-- name: reapply dns ratelimit
-  systemd:
-    name: boxd-dns-ratelimit
-    state: restarted
-    daemon_reload: true

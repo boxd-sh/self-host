@@ -796,6 +796,293 @@ a broken CA.
 
 ---
 
+## GKE
+
+With `[gke]` next to `[gcp]`, the installer runs boxd on Google Kubernetes
+Engine instead of on Compute Engine instances
+([Install on GKE](INSTALL.md#install-on-gke), `examples/gke/cluster.toml`).
+`[gcp]` keeps the project, the region and the state bucket; `[gke]` replaces
+`[gcp]`'s instance fields (`zone`, `vpc_cidr`, `image_family`) and
+`[[nodes]]`. Everything else in `cluster.toml` works as on the other targets.
+
+| Role | Runs as | Where |
+|---|---|---|
+| control | StatefulSet `boxd-control`, 1 or 3 Raft voters, pod network, a 20 GB disk each, a disruption budget of one | pool `system` |
+| console | StatefulSet `boxd-console`, pod network, a pinned ClusterIP the proxies route `app.` and `connect.` to | pool `system` |
+| proxy, dns | per edge `i`: StatefulSets `boxd-proxy-<i>` and `boxd-dns-<i>`, host network | pool `edge-<i>`, one node, its own load balancer IP |
+| worker | StatefulSet `boxd-worker`, one per node, privileged, host network and PID, VMs in the pod's own cgroup slice | pool `worker` |
+| node prep | DaemonSet `boxd-node-prep` on worker nodes: boxd's host kernel and one reboot, the local SSD RAID, then the label workers wait for | pool `worker` |
+
+The installer renders every Kubernetes object itself (no Helm) and applies it
+server-side; objects it labelled (`app.kubernetes.io/managed-by=boxd-install`,
+`boxd.sh/install=<namespace>`) and no longer renders are deleted. Every
+role's config is in the Secret `boxd-config`. Each proxy needs its own public
+address (a machine's SSH port is allocated per proxy, and `<machine>.<zone>`
+resolves to its proxy's IP), so the edge is one node pool of one node per
+edge, each behind its own passthrough load balancer, and each edge is a
+nameserver of the zone (`ns1` … `nsN`).
+
+### `[gke]` keys
+
+| Key | Default | |
+|---|---|---|
+| `cluster` | required | `"create"`, or an existing cluster: `"projects/<project>/locations/<location>/clusters/<name>"`, in `[gcp].project` and `[gcp].region` |
+| `namespace` | `"boxd"` | boxd's namespace; can't change after the first apply |
+| `zones` | required | the zones of `[gcp].region` the pools go in: one (a zonal cluster) or several (regional with `create`). The system pool and the edges spread over them; the worker pool is in the first |
+| `admin_cidrs` | required with `create` | who may reach the cluster's control plane; the installer's address must be among them |
+| `vpc_cidr`, `pods_cidr`, `services_cidr` | `vpc_cidr` required with `create`; `172.20.0.0/16`, `172.24.0.0/20` | `create` only: the nodes' subnet (inside `10.0.0.0/8`) and GKE's pod and service ranges (keep these outside 10/8) |
+| `control_replicas` | `3` | 1 or 3 Raft voters; fixed after the first apply |
+| `host_kernel` | `"boxd"` | `"boxd"` or `"stock"`: [Host kernel and Secure Boot](#host-kernel-and-secure-boot) |
+| `ingress` | `"public"` | `"public"` or `"internal"`: [Internal ingress](#internal-ingress) |
+| `internal_ips` | any free address | `internal` only: one address per edge, in the nodes' subnet |
+| `observability` | `true` | [Observability on GKE](#observability-on-gke) |
+| `analytics` | `true` | ClickHouse in the cluster for the console's usage graphs: [Usage graphs on GKE](#usage-graphs-on-gke) |
+| `analytics_disk_gb` | `100` | ClickHouse's pd-ssd disk; fixed once it exists |
+| `[gke.pools.system]` | `e2-standard-4`, a multiple of the zone count holding every control replica | `machine_type`, `nodes`. At least `control_replicas` nodes (one replica per node), a multiple of the zone count |
+| `[gke.pools.edge]` | `n2-standard-4`, 2 | `machine_type`, `nodes` (one edge per node). Edges can be added, not removed |
+| `[gke.pools.worker]` | required | `machine_type` (nested virtualization: Intel N2, N1, C2, C3), `nodes`, `local_ssd` (default 4, the local NVMe SSDs made one RAID 0 for the worker's data dir; 0 for a pd-balanced disk of `data_disk_gb` instead) |
+
+`[images]` (GKE only): `registry`, where the cluster pulls boxd's images and
+the VM image (default boxd's, `europe-docker.pkg.dev/boxd-prod-491613/releases`, public);
+`pull_secret`, an existing `kubernetes.io/dockerconfigjson` Secret in the
+namespace, used by every pod and by the workers' own pulls of VM images
+(create the namespace and the Secret before the first apply). The cluster
+pulls `boxd:<release>` (every role), `boxd-node-prep:<release>`,
+`boxd-dockerd:<release>`, `boxd-clickhouse:<release>` (with `analytics`) and,
+with `registry` set, `computer:<tag>` from
+there: mirror those to run without internet access. Artifact Registry in the
+project works through the nodes' service accounts, which the installer
+grants `roles/artifactregistry.reader`.
+
+Pools never autoscale (`autoscaling` keys are refused); `apply` sizes them.
+`[network]` takes only `mode = "routed"` and a `pool` clear of every GKE
+range. `[proxy] ssh_port` can't be 22 (the edge node's sshd holds it).
+`[worker] ksm` and `swap_gb` are not supported (GKE nodes have no swap). The
+license counts `nodes` × the worker type's vCPUs, and `validate` refuses a
+pool over it (16 without a key that lifts the limit).
+
+### Requirements of a cluster you run
+
+`validate` and `apply` check each of these and say what to change:
+
+- **GKE Standard** (Autopilot can't run privileged host-network workers with
+  nested virtualization), **1.28.4 or later**, **VPC-native**, on the
+  **legacy dataplane** (Dataplane V2 is refused: untested next to boxd's own
+  eBPF programs).
+- **Nodes in `10.0.0.0/8`**, and the node subnet, pod and service ranges
+  clear of `[network] pool`. In the same project (no Shared VPC yet), in
+  `[gcp].region`, with every `[gke] zones` entry among its node locations.
+- **Private Google Access** on the node subnet while images come from
+  Artifact Registry.
+- **Managed Service for Prometheus** on, unless `observability = false`.
+- A **maintenance exclusion** on node upgrades (warned when missing): GKE's
+  automatic node upgrades recreate worker nodes, and every machine on a
+  recreated worker is lost. The workers' disruption budget only delays it.
+- Network reach from the installer to the control plane.
+
+boxd's pools are dedicated: each is tainted `boxd.sh/pool=<pool>:NoSchedule`
+and labelled `boxd.sh/pool=<pool>`; boxd's pods tolerate the taint and select
+their pool; your workloads don't land there. (In a cluster the installer
+creates, the system pool is not tainted: GKE's own system pods run there.)
+boxd's namespace is labelled `pod-security.kubernetes.io/enforce=privileged`:
+the workers and edges are privileged and on the host network, so Pod
+Security admits them only there. Node prep holds a ClusterRole with `get`
+and `patch` on nodes, because a node can only be patched through a
+cluster-wide role (RBAC has no rule for "the node this pod runs on"); its
+script patches only its own node's `boxd.sh/node-ready` label.
+
+### Host kernel and Secure Boot
+
+- **`host_kernel = "boxd"`** (default): node prep installs boxd's host
+  kernel on each new worker node and reboots it once; the kubelet and GKE's
+  system pods run on it. Forks of running machines carry their RAM and start
+  in milliseconds. The kernel is not signed by Google, so the worker pool
+  runs with **Secure Boot off**, and Google does not support nodes on another
+  kernel. `validate` refuses it when the project enforces
+  `constraints/compute.requireShieldedVm`.
+- **`host_kernel = "stock"`**: GKE's Ubuntu kernel, Secure Boot on. A fork of
+  a running machine snapshots it first: a longer pause of the source
+  (hundreds of milliseconds). Everything else is the same.
+
+A new release's kernel reaches new worker nodes only: node prep never
+reboots a node that runs a worker.
+
+### Network and MTU
+
+Workers and proxies use boxd's routed network: Geneve (UDP 6081) between
+nodes, no L2. Geneve takes 50 bytes, so a VPC MTU of 8896 (what `create`
+makes) leaves guests their own 1500. On your cluster, the installer sets the
+guests' MTU from the VPC's: 1460 gives 1410, 1500 gives 1450.
+
+Firewall rules the installer adds: the edges' public ports (TCP 53, 80, 443,
+9443, 10000-30000, 40000-60000; UDP 53) from the internet (or, internal, from
+RFC 1918 ranges); Google's health checkers to the edges; between boxd's pools
+UDP 6081 and TCP 7000-7002 (Raft), 7100, 8000, 9010 (the worker's gRPC, also
+live migration) and 9101-9105 (metrics); and the pod range to the edges and
+workers on those TCP ports and 9443.
+
+### Internal ingress
+
+`ingress = "internal"` puts each edge behind an internal passthrough load
+balancer, with an address in the nodes' subnet (`internal_ips` pins them),
+for clients on your VPN or interconnect. Public CAs can't validate a zone
+served only inside the VPC, so it needs `[acme] ca = "local"`
+([TLS from your own CA](#tls-from-your-own-ca)). `apply` prints the
+conditional forwarder to set up on your resolvers: the zone → the edges'
+addresses.
+
+### Observability on GKE
+
+With `observability = true` (default): the cluster's workload logs go to Cloud
+Logging (with `create`), Managed Service for Prometheus scrapes every role
+through PodMonitorings (control 9101, proxy 9102, dns 9103, worker 9104), and
+terraform creates a Cloud Monitoring dashboard, *boxd on GKE (<cluster>/<namespace>)*:
+roles up, Raft, workers, the busiest machines, GKE's node metrics and boxd's
+warnings and errors. boxd's latency metrics are Prometheus summaries (a
+`quantile` label), not histograms. `observability = false` turns all of it
+off.
+
+Your own Prometheus can scrape the same endpoints (a host-network role
+serves on its node's IP, a pod-network one on its pod's):
+
+```yaml
+scrape_configs:
+  - job_name: boxd
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: [boxd] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_boxd_sh_role]
+        regex: control|proxy|dns|worker
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_label_boxd_sh_role]
+        regex: (.+);control
+        target_label: __address__
+        replacement: $1:9101
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_label_boxd_sh_role]
+        regex: (.+);proxy
+        target_label: __address__
+        replacement: $1:9102
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_label_boxd_sh_role]
+        regex: (.+);dns
+        target_label: __address__
+        replacement: $1:9103
+      - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_label_boxd_sh_role]
+        regex: (.+);worker
+        target_label: __address__
+        replacement: $1:9104
+      - source_labels: [__meta_kubernetes_pod_label_boxd_sh_role]
+        target_label: boxd_role
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+```
+
+### Usage graphs on GKE
+
+The console's usage graphs (each machine's CPU, memory and disk over time)
+come from ClickHouse, as on the other targets, where a metrics node runs it.
+On GKE, `analytics = true` (default) runs it in the cluster: the
+`boxd-clickhouse` StatefulSet, one pod on the system pool, its data on a
+pd-ssd disk (`premium-rwo`) of `analytics_disk_gb` GB, reached through its
+Service, its password generated in the installer state. Every apply applies
+the schema migrations, as the metrics node's converge does. Control, the
+proxies, the workers and the console get it as `[analytics]`.
+
+An `[analytics]` of your own (cluster.toml or the providers config, a
+ClickHouse Cloud service for instance) wins: the installer runs no
+ClickHouse then. `analytics = false` runs none either; without an
+`[analytics]` the graphs stay empty.
+
+The disk size is fixed once the disk exists: the StatefulSet's volume
+template can't change. To grow it, resize the claim
+(`./boxd-install kubectl -n boxd edit pvc data-boxd-clickhouse-0`, a larger
+`spec.resources.requests.storage`) and leave `analytics_disk_gb` as it is:
+it only sizes the disk when it is made. Turning `analytics` off later removes
+the pod and keeps the disk.
+
+### Changing a GKE cluster
+
+`apply` is the only way in, and an upgrade is an `apply` with a new
+`assets_version`:
+
+- **Control, console, edges** roll: a new image, or a config change other
+  than membership, restarts their pods one at a time (each edge in turn).
+  Membership changes restart nothing: `apply` writes the Secret, waits until
+  every control pod sees it, then runs `boxd-ctl sync-config`.
+- **Workers are updated in place.** A new image is patched into each running
+  worker pod, one at a time: the containers restart, the pod stays, and so
+  do its machines (the new worker adopts their VMMs). A config change
+  restarts the worker's process the same way. Any other change to the
+  worker's pod drains the worker first (`boxd-ctl node drain`), then
+  recreates its pod.
+- **More workers:** raise `[gke.pools.worker] nodes`. New workers join the
+  cluster before their pods start; a new node first gets boxd's kernel.
+- **Fewer workers:** lower `nodes`. The highest-numbered workers leave, one
+  at a time: `boxd-ctl node exclude`, `node drain` (boxd moves every machine
+  off: live for running bucket machines, relocation for hibernated ones, a
+  stopped machine's move for the rest), `node mark-dead`, the pod removed,
+  `remove-peer`, its Raft disk deleted, its node deleted from the pool. A
+  drain that leaves machines behind stops the apply and the worker stays.
+  A removed worker's node id is never used again. An apply that stops half
+  way finishes the removal next time. Machines on file storage (without
+  [bucket storage](#bucket-storage-storage_engine)) move only to a worker
+  you name: drain those workers first
+  (`./boxd-install ctl -- node drain worker-<id> --to worker-<id>`), then
+  lower `nodes`. Bucket storage is what makes workers on GKE movable.
+- **More edges:** raise `[gke.pools.edge] nodes`, then add the new
+  nameserver to your zone's delegation. Edges can't be removed by `apply`.
+- **Control replicas, the namespace, `cluster`, local SSD versus disk**
+  can't change after the first apply.
+- The worker pool's machine type, local SSD count and `host_kernel` can't
+  change on a running cluster: GKE would recreate every worker node.
+  `apply` refuses such a terraform plan.
+- With `create`, GKE's node upgrades are held by a maintenance exclusion
+  until the version's end of support; control-plane patches still land, at
+  weekends.
+
+### boxd-ctl and kubectl on GKE
+
+`boxd-ctl` runs in the control pods. From the installer:
+
+```sh
+./boxd-install ctl -- status
+./boxd-install ctl -- vm list
+./boxd-install ctl -- license install < license.key      # stdin passes through
+```
+
+`kubectl` from the same image, with credentials kept in
+`~/.config/boxd-install/kube`:
+
+```sh
+./boxd-install gcloud container clusters get-credentials <cluster> --location <location>
+./boxd-install kubectl -n boxd get pods -o wide
+./boxd-install kubectl -n boxd logs boxd-worker-0 -c worker
+./boxd-install kubectl -n boxd logs ds/boxd-node-prep
+```
+
+Don't delete a worker pod by hand: its machines stop with it (the workers'
+disruption budget blocks evictions, not deletes). Lower `nodes` instead.
+
+### Secrets at rest
+
+boxd's configs, keys among them, are in the Secret `boxd-config`. With
+`create`, the cluster encrypts Secrets with a Cloud KMS key terraform makes
+(application-layer Secrets encryption). On a cluster you run, turn it on
+yourself: `gcloud container clusters update <cluster> --location <location>
+--database-encryption-key projects/<p>/locations/<region>/keyRings/<ring>/cryptoKeys/<key>`,
+after granting GKE's service agent
+(`service-<project-number>@container-engine-robot.iam.gserviceaccount.com`)
+`roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. `validate` warns
+while it is off.
+
+### Limitations on GKE
+
+- Workers live in one zone (the first of `zones`).
+- GKE nodes have no swap, so workers don't overcommit memory beyond their
+  RAM; size the worker type for the machines it holds. Under node memory
+  pressure the kubelet evicts pods, and a worker's machines go with it.
+- Shared VPC, Dataplane V2 and Autopilot are not supported.
+
 ## Day-2 operations
 
 ### Updating the installer
@@ -845,6 +1132,9 @@ release's manifest lists no `bucket` feature).
 Every `apply` prints the version it installed (`Assets: <sha> (channel latest)`)
 and records it in the installer state. Note it down: it's the exact value to
 pin to stay on, or come back to, that release.
+
+On GKE an upgrade rolls control, the console and the edges, and updates
+workers in place: see [Changing a GKE cluster](#changing-a-gke-cluster).
 
 An upgrade covers everything in the bundle: binaries, the boxd host kernel,
 the console, the CLI your users download, and VM templates. Services restart
@@ -917,6 +1207,9 @@ the `BOXD_PRODUCT_LICENSE` line from `~/.boxd-<cluster>.env`, open a new
 shell, and apply. Nothing else changes. A new cluster never needs it.
 
 ### boxd-ctl (operator CLI)
+
+On GKE, `./boxd-install ctl -- <command>` runs it in the control pod
+([boxd-ctl and kubectl on GKE](#boxd-ctl-and-kubectl-on-gke)).
 
 Every control node has `boxd-ctl`, the operator CLI: orgs and members,
 quotas and machine sizes, machines, workers, domains, cluster status. It
@@ -1133,7 +1426,9 @@ your cluster the equivalent is always `<zone>` — `myapp.boxd.sh` there is
 
 ### Adding capacity
 
-Add the node to `cluster.toml` and re-apply — terraform creates the instance,
+On GKE, raise `[gke.pools.worker] nodes` (or the edge pool's) and re-apply:
+see [Changing a GKE cluster](#changing-a-gke-cluster). Elsewhere, add the
+node to `cluster.toml` and re-apply — terraform creates the instance,
 ansible converges it, and `apply` runs `boxd-ctl sync-config` on the raft
 leader, which adds the new node to the running cluster (a running cluster
 never adds a learner from its config by itself; installer releases before

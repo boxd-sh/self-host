@@ -7,6 +7,11 @@
     boxd_service: boxd-proxy
     boxd_role_name: proxy
 
+- name: CLI downloads for <zone>/downloads (the apex serves them)
+  import_role:
+    name: boxd-common
+    tasks_from: downloads
+
 - name: Create console directory
   file:
     path: /var/lib/boxd/console

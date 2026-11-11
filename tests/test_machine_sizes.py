@@ -144,6 +144,20 @@ class SeedTemplates(unittest.TestCase):
         self.assertLess(last_default, sizes_at)
         self.assertLess(sizes_at, first_delete)
 
+    def test_a_failed_template_stops_the_wait_at_once(self):
+        class Failing(FakeCtl):
+            def __call__(self, cfg, command, check=True, quiet=False):
+                res = super().__call__(cfg, command, check, quiet)
+                if command == "template list":
+                    res.stdout = res.stdout.replace("computer-1x4-v1-abcdef01  ready",
+                                                    "computer-1x4-v1-abcdef01  failed")
+                return res
+        fake = Failing()
+        with self.assertRaisesRegex(InstallError, "computer-1x4-v1-abcdef01 failed to build"):
+            self.seed(fake)
+        self.assertEqual(fake.commands.count("template list"), 2)  # the first list, then one poll
+        self.assertFalse([c for c in fake.commands if c.startswith("template set-default")])
+
     def test_default_sizes_are_set_too(self):
         fake = FakeCtl()
         self.seed(fake)

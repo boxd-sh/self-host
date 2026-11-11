@@ -261,36 +261,42 @@
   import_tasks: routed-network.yml
   when: boxd_network_mode | default('bridge') == 'routed'
 
-- name: Install per-VM DNS egress rate-limit script (anti-flood)
-  template:
-    src: boxd-dns-ratelimit.sh.j2
-    dest: /usr/local/bin/boxd-dns-ratelimit.sh
-    mode: "0755"
-  notify: reapply dns ratelimit
-
-- name: Install DNS rate-limit systemd service
-  copy:
-    content: |
-      [Unit]
-      Description=boxd per-VM DNS egress rate limit (anti-flood)
-      After=network-online.target boxd-vxlan.service
-      Wants=network-online.target
-      [Service]
-      Type=oneshot
-      RemainAfterExit=yes
-      ExecStart=/usr/local/bin/boxd-dns-ratelimit.sh
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/boxd-dns-ratelimit.service
-    mode: "0644"
-  notify: reapply dns ratelimit
-
-- name: Enable + start DNS rate-limit service
+# No DNS rate limit on self-hosted workers: the per-machine and egress DNS limits
+# (boxd-dns-ratelimit) protect boxd's managed cloud from floods, and on a cluster
+# of one organization they only got in the way (on GKE they throttled the
+# worker's own lookups and failed its bucket uploads). A host an older installer
+# set up loses the service, the script and its rules.
+- name: Remove the DNS rate-limit service (older installers)
   systemd:
     name: boxd-dns-ratelimit
-    enabled: true
-    state: started
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove the DNS rate-limit files (older installers)
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/boxd-dns-ratelimit.service
+    - /usr/local/bin/boxd-dns-ratelimit.sh
+  register: dns_ratelimit_files
+
+- name: Reload systemd after removing the DNS rate-limit service
+  systemd:
     daemon_reload: true
+  when: dns_ratelimit_files.changed
+
+- name: Remove the DNS rate-limit rules (older installers)
+  shell: |
+    set -e
+    removed=0
+    for chain in FORWARD OUTPUT; do
+      { iptables -S "$chain" 2>/dev/null | grep -E -- '--hashlimit-name (dnsflood|dnsout)_' || true; } | sed 's/^-A /-D /' \
+        | while read -r rule; do iptables $rule; echo removed; done
+    done
+  register: dns_ratelimit_rules
+  changed_when: "'removed' in dns_ratelimit_rules.stdout"
 
 # Guest firewall: an nftables ruleset keyed
 # on the guest's tap, so guests reach the gateway's services (DNS, metadata,
