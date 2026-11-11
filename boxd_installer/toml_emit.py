@@ -6,7 +6,7 @@ sub-tables, then arrays-of-tables LAST. Otherwise TOML binds later keys into
 the last array element.
 """
 
-AOT_KEYS = {"static_records", "internal_services", "buckets", "sizes"}
+AOT_KEYS = {"static_records", "internal_services", "buckets", "sizes", "private_services"}
 _ESCAPES = {"\\": "\\\\", '"': '\\"', "\b": "\\b", "\t": "\\t", "\n": "\\n",
             "\f": "\\f", "\r": "\\r"}
 

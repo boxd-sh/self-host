@@ -7,7 +7,7 @@ import ssl
 import tomllib
 import urllib.parse
 
-from . import clouds
+from . import clouds, private_services
 from .util import InstallError
 
 KNOWN_ROLES = {"control", "worker", "proxy", "console", "dns", "metrics"}
@@ -52,7 +52,9 @@ _INSTANCE_STORE_FAMILY = re.compile(r"(?:i|im|is)\d.*|[a-z]+\d+[a-z]*d[a-z]*")
 # move (live migration); boxd's plans/2026-10-27-routed-network.md.
 NETWORK_MODES = ("bridge", "routed")
 NETWORK_KEYS = {"vni_range_start", "vni_range_end", "bridge_subnet_base",
-                "mode", "pool", "guest_mtu"}
+                "mode", "pool", "guest_mtu",
+                # The installer's own: where private services' addresses come from.
+                "service_range"}
 # Ranges customers run inside their machines (the guest's mask is the whole
 # pool, so the pool must not hide them): Kubernetes services and flannel. The
 # other ones boxd's rollout runbook lists (172.16/12, 100.64/10, 192.168/16)
@@ -421,6 +423,7 @@ def _validate(doc: dict) -> None:
     else:
         _validate_nodes_and_network(doc, cloud, mod, errs)
     _validate_worker_and_services(doc, cloud, mod, errs)
+    private_services.validate(doc, errs, target)
     if not tmod:
         mod.validate(doc, errs)
     _validate_templates(doc, errs)

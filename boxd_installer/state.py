@@ -89,8 +89,35 @@ class State:
                 bridges[node.name] = next_bridge
                 next_bridge += 1
 
+        services = self.allocate_service_addresses(cfg)
         self.save()
-        return Allocation(cfg, ids, vnis, bridges)
+        return Allocation(cfg, ids, vnis, bridges, services)
+
+    def allocate_service_addresses(self, cfg) -> dict:
+        """Each private service name's service address (canonical name to address), from
+        [network] service_range. Remembered for good: a box and its snapshots hold the address,
+        so it never moves to another name (private_services.allocate)."""
+        from . import private_services
+        names: list[str] = []
+        for s in private_services.declared(cfg.doc):
+            n = private_services.canonical(s["name"])
+            if n not in names:
+                names.append(n)
+        remembered: dict = self.data.setdefault("service_addresses", {})
+        if not names:
+            return {}
+        try:
+            return private_services.allocate(remembered, names,
+                                             private_services.service_range(cfg.doc))
+        except private_services.AllocationError as e:
+            raise InstallError(str(e)) from None
+
+    def drop_service_addresses(self) -> int:
+        """Forget every private service's address; the next apply allocates afresh. Boxes that
+        resolved a name before keep dialling the old address until they look it up again."""
+        n = len(self.data.pop("service_addresses", {}) or {})
+        self.save()
+        return n
 
     def retire_node_id(self, key: str) -> int | None:
         """Forget the id of `<node name>/<role>` for good (a GKE worker whose
@@ -283,11 +310,14 @@ def _mint_zerossl_eab(email: str | None) -> dict:
     return {"kid": d["eab_kid"], "hmac": d["eab_hmac_key"]}
 
 class Allocation:
-    def __init__(self, cfg, ids: dict, vnis: dict, bridges: dict):
+    def __init__(self, cfg, ids: dict, vnis: dict, bridges: dict,
+                 service_addresses: dict | None = None):
         self.cfg = cfg
         self.ids = ids
         self.vnis = vnis
         self.bridge_indexes = bridges
+        # Private service name (canonical) to its service address.
+        self.service_addresses = service_addresses or {}
 
     def node_id(self, node_name: str, role: str) -> int:
         return self.ids[f"{node_name}/{role}"]

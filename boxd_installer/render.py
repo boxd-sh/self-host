@@ -4,7 +4,7 @@ from cluster.toml + allocation + terraform outputs.
 Projection map — which cluster.toml service tables reach which service —
 mirrors how the boxd binaries share one BoxdConfig schema.
 """
-from . import clouds, config, local_ca, telemetry, toml_emit
+from . import clouds, config, local_ca, private_services, telemetry, toml_emit
 from .config import OIDC_REQUIRED, resolver_addr, rust_trim
 from .util import InstallError, log
 
@@ -455,6 +455,28 @@ class Renderer:
     def _ns_map(self) -> dict:
         return {n.qualifiers["dns"]: n for n in self.cfg.nodes_with("dns")}
 
+    def private_services(self) -> list[dict]:
+        """[[worker.private_services]] as boxd reads it: each table with the service address the
+        installer allocated for its name, the same on every worker."""
+        declared = private_services.declared(self.cfg.doc)
+        if not declared:
+            return []
+        if not self._routed():
+            subnets = {w: self.alloc.bridge_subnet(w) for w in self.alloc.bridge_indexes}
+            if why := private_services.bridge_overlap_error(declared, subnets):
+                raise InstallError(why)
+        out = []
+        for s in declared:
+            entry = {"name": private_services.canonical(s["name"]),
+                     "address": self.alloc.service_addresses[private_services.canonical(s["name"])],
+                     "port": s["port"]}
+            if "target" in s:
+                entry["target"] = s["target"]
+            else:
+                entry["target_subnets"] = list(s["target_subnets"])
+            out.append(entry)
+        return out
+
     def worker_doc(self, node) -> dict:
         doc = self._base(node, "worker")
         # One egress CA for every worker, inline PEM like boxd's
@@ -480,6 +502,8 @@ class Renderer:
             # One build of each bucket template, shared by every worker,
             # unless [worker] templates says otherwise.
             worker.setdefault("templates", "both")
+        if services := self.private_services():
+            worker["private_services"] = services
         doc["worker"] = worker
         doc["api"] = {"jwt_secret": self.jwt}
         if self.cfg.table("github"):
@@ -600,6 +624,11 @@ class Renderer:
         # The worker role ships deploy-config/<worker>/bucket.toml (0600), or
         # removes a bucket file left from before.
         lines.append(f"boxd_storage_engine: {'true' if config.storage_engine_on(cfg.doc) else 'false'}")
+        # The relay for private services: its unit and user, and the firewall's second copy of
+        # where it may connect (--private-service CIDR:PORT). Empty: neither.
+        bounds = private_services.firewall_bounds(private_services.declared(cfg.doc))
+        lines.append("boxd_private_service_bounds: ["
+                     + ", ".join(f'"{b}"' for b in bounds) + "]")
         if self._routed():
             # No VXLAN mesh: boxd_workers (the bridge workers) is empty.
             lines += ["", "boxd_network_mode: routed", f"boxd_routed_pool: {cfg.pool}",

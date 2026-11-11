@@ -327,6 +327,12 @@
       {% for proxy in groups['proxy'] %}
       --proxy {{ bridge_subnet | regex_replace('0\.0/16$', '0.' ~ (254 - groups['proxy'].index(proxy))) }}
       {% endfor %}
+      {% if boxd_private_service_bounds | length > 0 %}
+      --relay-user boxd-relay
+      {% for bound in boxd_private_service_bounds %}
+      --private-service {{ bound }}
+      {% endfor %}
+      {% endif %}
 
 - name: Install guest firewall script
   copy:
@@ -384,6 +390,118 @@
     dest: /etc/systemd/system/boxd-worker.service.d/guest-fw.conf
     mode: "0644"
   notify: reload systemd
+
+# The relay for private services ([[worker.private_services]]): its own unit and user, no
+# capabilities, so it outlives worker restarts and holds none of the worker's privilege. The
+# worker writes its state to /run/boxd/relay/state.json and reads its status file. Installed only
+# when services are declared (boxd_private_service_bounds, from the installer); stopped and
+# disabled otherwise. It does not start without the firewall's relay chain (ExecStartPre, run as
+# root by the `+`), the firewall's second copy of where it may connect.
+- name: Relay user for private services
+  user:
+    name: boxd-relay
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+  when: boxd_private_service_bounds | length > 0
+
+- name: Copy boxd-relay
+  boxd_copy:
+    src: "{{ boxd_release_dir }}/boxd-relay"
+    dest: /usr/local/bin/boxd-relay
+    mode: preserve
+  when: boxd_private_service_bounds | length > 0
+  notify: restart boxd-relay
+
+- name: Set boxd-relay permissions
+  file:
+    path: /usr/local/bin/boxd-relay
+    mode: "0755"
+    owner: root
+    group: root
+  when: boxd_private_service_bounds | length > 0
+
+- name: Install the boxd-relay unit
+  copy:
+    content: |
+      [Unit]
+      Description=boxd relay for private services
+      After=network-online.target boxd-guest-fw.service
+      Wants=network-online.target boxd-guest-fw.service
+      [Service]
+      ExecStartPre=+/usr/local/bin/boxd-guest-fw --verify --relay-user boxd-relay{{ ' --routed' if boxd_network_mode | default('bridge') == 'routed' else '' }}
+      ExecStart=/usr/local/bin/boxd-relay --state /run/boxd/relay/state.json --status /run/boxd-relay/status.json
+      Environment=RUST_LOG=info NO_COLOR=1 BOXD_METRICS_LISTEN=127.0.0.1:9107
+      User=boxd-relay
+      Group=boxd-relay
+      Restart=always
+      RestartSec=1s
+      RuntimeDirectory=boxd-relay
+      LimitNOFILE=65536
+      Slice=boxd.slice
+      NoNewPrivileges=yes
+      CapabilityBoundingSet=
+      ProtectSystem=strict
+      ProtectHome=yes
+      PrivateTmp=yes
+      PrivateDevices=yes
+      ProtectKernelTunables=yes
+      ProtectKernelModules=yes
+      ProtectControlGroups=yes
+      RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+      RestrictNamespaces=yes
+      LockPersonality=yes
+      MemoryDenyWriteExecute=yes
+      ProtectClock=yes
+      ProtectKernelLogs=yes
+      ProtectHostname=yes
+      ProtectProc=invisible
+      RestrictSUIDSGID=yes
+      RestrictRealtime=yes
+      RemoveIPC=yes
+      SystemCallArchitectures=native
+      SystemCallFilter=@system-service
+      SystemCallFilter=~@privileged @resources
+      # The status file is read by the worker (user boxd).
+      UMask=0022
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/boxd-relay.service
+    mode: "0644"
+  when: boxd_private_service_bounds | length > 0
+  notify: restart boxd-relay
+
+# The firewall is re-applied by a handler at the end of the play; the relay refuses to start
+# until the firewall holds its chain, so a first install applies it now (one atomic batch, it
+# cuts nothing).
+- name: Load the guest firewall's relay chain before the relay starts
+  shell: |
+    /usr/local/bin/boxd-guest-fw --verify --relay-user boxd-relay{{ ' --routed' if boxd_network_mode | default('bridge') == 'routed' else '' }} >/dev/null 2>&1 && exit 0
+    systemctl daemon-reload && systemctl restart boxd-guest-fw && echo applied
+  register: boxd_relay_chain
+  changed_when: "'applied' in boxd_relay_chain.stdout"
+  when: boxd_private_service_bounds | length > 0
+
+- name: Enable + start boxd-relay
+  systemd:
+    name: boxd-relay
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: boxd_private_service_bounds | length > 0
+
+- name: Look for a boxd-relay unit left from private services
+  stat:
+    path: /etc/systemd/system/boxd-relay.service
+  register: boxd_relay_unit
+  when: boxd_private_service_bounds | length == 0
+
+- name: Stop and disable boxd-relay (no private services)
+  systemd:
+    name: boxd-relay
+    enabled: false
+    state: stopped
+  when: boxd_private_service_bounds | length == 0 and boxd_relay_unit.stat.exists
 
 # Bridge mode: guest -> 10.0.0.0/8 keeps its real source.
 # Masquerading it made a guest on another worker arrive as that worker's

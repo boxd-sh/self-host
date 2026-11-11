@@ -12,6 +12,15 @@
     state: restarted
     daemon_reload: true
 
+# After the firewall (handlers run in this order): the relay's ExecStartPre checks the firewall's
+# relay chain. Only when its binary or unit changed: a restart cuts its open connections.
+- name: restart boxd-relay
+  systemd:
+    name: boxd-relay
+    state: restarted
+    daemon_reload: true
+  when: boxd_private_service_bounds | length > 0
+
 - name: restart boxd service
   systemd:
     name: boxd-worker
