@@ -475,7 +475,15 @@ def recreate_worker(cfg, i: int, worker_id: str | None) -> None:
     registered = worker_id and worker_id in _registered(cfg)
     if registered:
         ansible.ctl(cfg, f"node exclude {worker_id}")
-        drain(cfg, worker_id)
+        try:
+            drain(cfg, worker_id)
+        except InstallError as e:
+            # Its pod stays as it was: back in placement, or it would stay out after the change
+            # is reverted too (a pod that matches the spec is never recreated, nor included).
+            ansible.ctl(cfg, f"node include {worker_id}")
+            raise InstallError(f"{e}\n{worker_id} is back in placement with its pod unchanged: "
+                               "the change needs its machines moved first (each pod spec change "
+                               "recreates the worker's pod)") from None
     kubectl(cfg, "delete", "pod", pod, "--wait=true", quiet=False)
     _wait(lambda: _pod_ready(cfg, pod, other_than=old), WORKER_READY_TIMEOUT, 10,
           f"{pod} did not come back after it was recreated",

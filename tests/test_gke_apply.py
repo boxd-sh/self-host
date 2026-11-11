@@ -204,6 +204,37 @@ class DestroyGke(unittest.TestCase):
         self.assertEqual(calls.write_tfvars.call_args.args[4], {"vpc_mtu": 1500})
         self.assertNotIn("gke", state.data)
 
+class RecreateWorker(unittest.TestCase):
+    """A pod spec change drains the worker, then recreates its pod. A drain that fails (machines
+    that can't move) puts the worker back in placement and leaves its pod alone."""
+    def recreate(self, drain_error=None):
+        d = tempfile.mkdtemp(prefix="gke-recreate-")
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = config.Config(gke_doc(), d)
+        ctl, kubectl = mock.Mock(), mock.Mock()
+        drain = mock.Mock(side_effect=drain_error)
+        with mock.patch.multiple(kube, drain=drain, kubectl=kubectl, _wait=mock.Mock(),
+                                 _worker_pod=mock.Mock(return_value={"metadata": {"uid": "u1"}}),
+                                 _registered=mock.Mock(return_value={"worker-5"})), \
+                mock.patch.object(kube.ansible, "ctl", ctl):
+            try:
+                kube.recreate_worker(cfg, 0, "worker-5")
+            finally:
+                self.ctl = [c.args[1] for c in ctl.call_args_list]
+                self.deleted = any(c.args[1:3] == ("delete", "pod") for c in kubectl.call_args_list)
+
+    def test_a_failed_drain_puts_the_worker_back(self):
+        failed = InstallError("boxd-ctl node drain worker-5 failed, so the worker stays: 2 left")
+        with self.assertRaisesRegex(InstallError, "(?s)2 left.*worker-5 is back in placement"):
+            self.recreate(failed)
+        self.assertEqual(self.ctl, ["node exclude worker-5", "node include worker-5"])
+        self.assertFalse(self.deleted, "the pod is not recreated")
+
+    def test_a_drained_worker_gets_its_new_pod(self):
+        self.recreate()
+        self.assertEqual(self.ctl, ["node exclude worker-5", "node include worker-5"])
+        self.assertTrue(self.deleted)
+
 if __name__ == "__main__":
     unittest.main()
 

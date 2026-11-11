@@ -524,6 +524,10 @@ def features(root: str) -> list[str]:
     got = _load_manifest(root).get("features", [])
     return [f for f in got if isinstance(f, str)] if isinstance(got, list) else []
 
+def has_file(root: str, rel: str) -> bool:
+    """Whether a bundle's manifest lists `rel` (e.g. "bin/boxd-relay")."""
+    return rel in _load_manifest(root).get("files", {})
+
 def verify_manifest(root: str) -> None:
     manifest = _load_manifest(root)
     for rel, want in manifest["files"].items():

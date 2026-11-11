@@ -9,8 +9,8 @@ import shutil as _shutil
 import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
-               oidc, remote_state, render, storage_engine, telemetry, tf)
-from .state import State, generate_egress_ca
+               oidc, private_services, remote_state, render, storage_engine, telemetry, tf)
+from .state import Allocation, State, generate_egress_ca
 from .util import InstallError, log
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -147,6 +147,8 @@ def _apply(cfg, args) -> int:
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     check_storage_bundle(cfg, assets_root)
+    check_relay_bundle(cfg, assets_root)
+    check_private_service_bridges(cfg, state)
     # Before terraform: once the storage catalog is on, the engine and its
     # bucket are one-way (storage_engine.check_guard).
     storage = storage_engine.check_guard(cfg, state, assets_root)
@@ -351,6 +353,31 @@ def check_storage_bundle(cfg, assets_root: str) -> None:
             "is one without it (its manifest lists no \"bucket\" feature). Bucket storage "
             "comes with a license key that includes it: ask your boxd contact, or remove "
             "[storage_engine]")
+
+def check_relay_bundle(cfg, assets_root: str) -> None:
+    """[[worker.private_services]] needs a bundle that ships the relay (bin/boxd-relay).
+    Fail closed: an older bundle's worker would ignore the tables without a word, and boxes
+    would get no answer for the names."""
+    if not private_services.declared(cfg.doc):
+        return
+    if not assets.has_file(assets_root, "bin/boxd-relay"):
+        raise InstallError(
+            f"[[worker.private_services]] needs a release with the relay for private services, "
+            f"and {cfg.assets_version[:12]} is one without it (its manifest lists no "
+            "bin/boxd-relay): set [cluster].assets_version to a newer release, or remove the "
+            "[[worker.private_services]] tables")
+
+def check_private_service_bridges(cfg, state) -> None:
+    """Before terraform: no private service target inside a worker's bridge /16, the /16s this
+    apply gives new workers included. Found only at render, a new worker's instance would exist
+    and its index be saved, and every later apply would stop there."""
+    declared = private_services.declared(cfg.doc)
+    if not declared or cfg.network_mode == "routed":
+        return
+    alloc = Allocation(cfg, {}, {}, state.bridge_indexes_for(cfg))
+    subnets = {w: alloc.bridge_subnet(w) for w in alloc.bridge_indexes}
+    if why := private_services.bridge_overlap_error(declared, subnets):
+        raise InstallError(why)
 
 def bundle_changes(state, cfg) -> bool:
     """Whether this apply installs another bundle than the last successful
@@ -707,6 +734,17 @@ def cmd_state(args) -> int:
         print(f"removed {n} stored ACME EAB key(s); the next `apply` mints a new one "
               "and restarts boxd-control with it" if n else "no stored ACME EAB key to remove")
         return 0
+    if args.action == "reset-service-addresses":
+        if os.path.isdir(PULLED_STATE) and os.listdir(PULLED_STATE):
+            raise InstallError("./pulled-state hasn't been pushed: push or delete it first "
+                               "(pushing it later would bring the old addresses back)")
+        args.state_dir = tempfile.mkdtemp(prefix="boxd-installer-state-")
+        with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
+            n = State(args.state_dir).drop_service_addresses()
+        print(f"forgot {n} private service address(es); the next `apply` allocates them again "
+              "from [network].service_range (boxes get the new ones on their next lookup)"
+              if n else "no private service addresses to forget")
+        return 0
     if args.action == "pull":
         os.makedirs(args.state_dir, mode=0o700, exist_ok=True)
         remote_state.pull(cfg, args.state_dir)
@@ -736,9 +774,11 @@ def main() -> int:
                                     "e.g. ./boxd-install ctl -- status")
     pc.add_argument("ctl_args", nargs=argparse.REMAINDER)
     ps = sub.add_parser("state")
-    ps.add_argument("action", choices=["pull", "push", "reset-eab"],
+    ps.add_argument("action", choices=["pull", "push", "reset-eab", "reset-service-addresses"],
                     help="pull: decrypt into ./pulled-state; push: encrypt it back and delete it; "
-                         "reset-eab: forget the stored ACME EAB key so the next apply mints a new one")
+                         "reset-eab: forget the stored ACME EAB key so the next apply mints a new one; "
+                         "reset-service-addresses: forget the private services' addresses so the "
+                         "next apply allocates them again")
     pp = sub.add_parser("providers", formatter_class=argparse.RawDescriptionHelpFormatter,
                         description="Sign-in, email, backups and integration secrets, kept "
                                     "encrypted in the state bucket (never on disk here).",

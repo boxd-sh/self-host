@@ -25,6 +25,7 @@ organised by task and adds the context the help can't.
 - [Backups](#backups)
 - [Snapshot archive](#snapshot-archive)
 - [Bucket storage](#bucket-storage)
+- [Private services](#private-services)
 - [Troubleshooting](#troubleshooting)
 - [Logs and support](#logs-and-support)
 - [Ask boxd first](#ask-boxd-first)
@@ -708,6 +709,44 @@ is refused while the cluster runs the engine.
 **Destroy** keeps the bucket while it holds anything, and says so. A rebuilt
 cluster starts under a new prefix in it; the old prefix's objects stay until
 you delete them.
+
+## Private services
+
+With `[[worker.private_services]]` ([REFERENCE.md](docs/REFERENCE.md#private-services)),
+boxes reach the services you declared through a relay on each worker.
+
+**Check it.** On a worker:
+
+```sh
+systemctl status boxd-relay                    # active; refuses to start without the firewall's relay chain
+cat /run/boxd-relay/status.json                # the relay: state generation, each service's addresses, open connections
+sudo cat /run/boxd/relay/state.json            # the worker: which box may use which service
+journalctl -u boxd-relay -f                    # one line per connection: box, service, target, bytes, how it ended
+journalctl -u boxd-worker | grep boxd::relay   # the worker's view of the relay
+```
+
+From a box: `getent hosts <name>` gives the service address, and
+`curl https://<name>/` (or your client) reaches the service.
+
+**A box gets a connect, then a reset.** Read the relay's log line for that
+connection: `refused=` says why (`not_permitted` with the reason
+`isolated` or `allowlist`, `no_address`, `connect_failed`, `box_limit`).
+`no_address` with `target_subnets` means the worker host can't resolve the
+name, or the name resolves outside the subnets (the relay logs both). On
+AWS the private hosted zone must be associated with the cluster's VPC.
+
+**Signals.** The worker warns, and `boxd_worker_relay_healthy` is 0, when
+the relay's status is missing, stale or behind the state it wrote: the unit
+isn't running or can't read the state. The relay exports `boxd_relay_*`
+on `127.0.0.1:9107` (connections by service and outcome, bytes, open
+connections, each service's address count). The guest firewall's metrics
+count what the relay's user tried to reach outside the declared services:
+`boxd_guest_fw_dropped_packets_total{rule="relay: outside the declared services"}`.
+
+**Changing the services** is an `apply`: the workers restart and hand the
+relay the new list; connections to an unchanged service stay up, a removed
+or changed one's are closed. The relay itself restarts only when a new
+release changes its binary.
 
 ## Troubleshooting
 

@@ -76,21 +76,56 @@ class State:
                     next_id += 1
 
         vnis: dict = self.data.setdefault("vnis", {})
-        bridges: dict = self.data.setdefault("bridge_indexes", {})
         next_vni = max([cfg.network["vni_range_start"] - 1] + list(vnis.values())) + 1
-        next_bridge = max([-1] + list(bridges.values())) + 1
         # Routed: one pool, no per-worker VNI or /16 (those of a cluster that
         # was bridge stay, unused, so going back keeps the old addresses).
         for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
             if node.name not in vnis:
                 vnis[node.name] = next_vni
                 next_vni += 1
+        bridges = self.data["bridge_indexes"] = self.bridge_indexes_for(cfg)
+
+        services = self.allocate_service_addresses(cfg)
+        self.save()
+        return Allocation(cfg, ids, vnis, bridges, services)
+
+    def bridge_indexes_for(self, cfg) -> dict:
+        """Every worker's bridge index as allocate() gives them, without saving: the remembered
+        ones (every worker that ever had one, removed ones included) and the next free ones for
+        workers cluster.toml adds, in its order. Routed mode adds none."""
+        bridges = dict(self.data.get("bridge_indexes", {}))
+        next_bridge = max([-1] + list(bridges.values())) + 1
+        for node in cfg.nodes_with("worker") if cfg.network_mode != "routed" else []:
             if node.name not in bridges:
                 bridges[node.name] = next_bridge
                 next_bridge += 1
+        return bridges
 
+    def allocate_service_addresses(self, cfg) -> dict:
+        """Each private service name's service address (canonical name to address), from
+        [network] service_range. Remembered for good: a box and its snapshots hold the address,
+        so it never moves to another name (private_services.allocate)."""
+        from . import private_services
+        names: list[str] = []
+        for s in private_services.declared(cfg.doc):
+            n = private_services.canonical(s["name"])
+            if n not in names:
+                names.append(n)
+        remembered: dict = self.data.setdefault("service_addresses", {})
+        if not names:
+            return {}
+        try:
+            return private_services.allocate(remembered, names,
+                                             private_services.service_range(cfg.doc))
+        except private_services.AllocationError as e:
+            raise InstallError(str(e)) from None
+
+    def drop_service_addresses(self) -> int:
+        """Forget every private service's address; the next apply allocates afresh. Boxes that
+        resolved a name before keep dialling the old address until they look it up again."""
+        n = len(self.data.pop("service_addresses", {}) or {})
         self.save()
-        return Allocation(cfg, ids, vnis, bridges)
+        return n
 
     def retire_node_id(self, key: str) -> int | None:
         """Forget the id of `<node name>/<role>` for good (a GKE worker whose
@@ -283,11 +318,14 @@ def _mint_zerossl_eab(email: str | None) -> dict:
     return {"kid": d["eab_kid"], "hmac": d["eab_hmac_key"]}
 
 class Allocation:
-    def __init__(self, cfg, ids: dict, vnis: dict, bridges: dict):
+    def __init__(self, cfg, ids: dict, vnis: dict, bridges: dict,
+                 service_addresses: dict | None = None):
         self.cfg = cfg
         self.ids = ids
         self.vnis = vnis
         self.bridge_indexes = bridges
+        # Private service name (canonical) to its service address.
+        self.service_addresses = service_addresses or {}
 
     def node_id(self, node_name: str, role: str) -> int:
         return self.ids[f"{node_name}/{role}"]
