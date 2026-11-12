@@ -10,8 +10,10 @@
 #
 # The sensor protects its own settings: the hosts' sensor update policy must have uninstall and
 # maintenance protection off. With it on, the sensor refuses this change even to SYSTEM (sensor
-# 8.11, the policy's defaults), the hook fails and the copy stays off the network. Check the key
-# against CrowdStrike's documentation for your sensor version.
+# 8.11), the hook fails and the copy stays off the network. Falcon also raises a High "Defense
+# Evasion via Disable or Modify Tools" detection for the attempt, protection on or off, unless an
+# IOA exclusion covers it (the hook runs from C:\ProgramData\boxd\boxd-boot.ps1, as SYSTEM). Check
+# the key against CrowdStrike's documentation for your sensor version.
 #
 # Rename to crowdstrike-falcon.ps1 to use it (on-clone.d/README.md).
 $ErrorActionPreference = 'Stop'

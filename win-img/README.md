@@ -131,7 +131,12 @@ has the details, the variables a hook sees and the rules.
    that setting: the hosts' **sensor update policy must have uninstall and maintenance
    protection off**. With protection on, the sensor refuses the change, the hook fails, and
    the copy stays off the network (boxd never shows it running) rather than come up as its
-   source. Without the hook, copies come up with their source's AID.
+   source. Either way Falcon sees the attempt as tampering with the sensor: a **High
+   "Defense Evasion via Disable or Modify Tools" detection** on the source host's name, for
+   every copy, unless you add an IOA exclusion for it (the hook runs from
+   `C:\ProgramData\boxd\boxd-boot.ps1`). Without the hook, copies come up with their source's
+   AID. Turning protection off and excluding the hook are your security team's calls: if
+   neither is acceptable, don't fork or snapshot machines with the sensor.
 4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
    internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
    your cloud.
