@@ -379,6 +379,15 @@ image = "registry.example.com/boxd/windows-server-2025:2026-11"
 # to any worker) or "per-host" (only to the workers in `hosts`, the ones you licensed).
 # licensing = "per-vm"
 # hosts = ["boxd-worker-1", "boxd-worker-2"]   # names from [[nodes]]
+# Optional. How a snapshot or a fork of a Windows machine is taken:
+# - "generalize" (default): the disk alone, generalized with sysprep. Every copy gets its own
+#   SID and computer name, and boots through Windows Setup: about 35 s from a snapshot, 70-80 s
+#   for a fork.
+# - "fast": memory, devices and disk, never generalized. A copy resumes where its source was
+#   and only its network address changes, in seconds. It keeps its source's SID, computer
+#   name and KMS client ID: not for Active Directory members, and a KMS host counts the copies
+#   as one client.
+# copies = "generalize"
 ```
 
 `image` needs a tag or a digest. `[windows]` needs `[license] key_file` with a key that
@@ -402,7 +411,10 @@ credentials. Every `apply` then:
 - sets the cluster's Windows image, KMS host and licensing mode (`boxd-ctl image
   set-windows`, `boxd-ctl cluster-config set windows_kms` and `windows_licensing`), and
   marks the workers in `hosts` as licensed Windows hosts and every other worker as not
-  (`boxd-ctl node windows-host`), before it switches the licensing mode.
+  (`boxd-ctl node windows-host`), before it switches the licensing mode;
+- writes `copies` into every control, proxy and worker node's config (`[windows] copies`)
+  and restarts the nodes whose config changed. It decides how new copies are taken: a
+  snapshot taken before a change restores as what it is.
 
 Without `[windows]` nothing changes, and a Windows create is refused with a sentence that
 names what's missing. Removing `[windows]` later undoes nothing: the image, the settings

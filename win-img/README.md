@@ -106,6 +106,10 @@ boot, as SYSTEM, before it gets an address. A hook that fails keeps the copy off
 A fresh machine from the image doesn't run them. [on-clone.d/README.md](on-clone.d/README.md)
 has the details, the variables a hook sees and the rules.
 
+With `[windows] copies = "fast"` in cluster.toml (docs/REFERENCE.md "Windows machines"), a
+copy is not booted: it resumes its source's memory with a new network address. No hook runs
+then, and the software on it carries on as its source, its host IDs included.
+
 ## Example: CrowdStrike Falcon
 
 1. **The sensor and your CID.** With a `[crowdstrike]` provider (a Falcon API client with
@@ -145,6 +149,9 @@ has the details, the variables a hook sees and the rules.
    policy has uninstall and maintenance protection off. With protection on, the sensor refuses
    and the copy stays off the network. Either way Falcon raises a **High "Defense Evasion via
    Disable or Modify Tools" detection** for every copy, unless an IOA exclusion covers the hook.
+   With `copies = "fast"` a copy resumes its source's running sensor instead of booting, and
+   keeps its source's AID until the sensor notices otherwise: check the copies in your Falcon
+   console before relying on it.
 4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
    internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
    your cloud.

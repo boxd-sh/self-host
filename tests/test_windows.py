@@ -51,6 +51,13 @@ class Validation(unittest.TestCase):
         self.assertEqual(validate(win_doc(licensing="per-host", hosts=[WORKER])), "")
         self.assertEqual(validate(aws_doc()), "", "no [windows]: nothing changes")
 
+    def test_copies(self):
+        self.assertEqual(validate(win_doc(copies="generalize")), "")
+        self.assertEqual(validate(win_doc(copies="fast")), "")
+        for bad in ("Fast", "memory", "", 1, True):
+            self.assertIn("[windows].copies must be one of generalize, fast",
+                          validate(win_doc(copies=bad)), bad)
+
     def test_unknown_keys(self):
         self.assertIn("[windows].registry: unknown key", validate(win_doc(registry="x")))
         self.assertIn("[windows] must be a table", validate({**aws_doc(), "windows": "on"}))
@@ -229,6 +236,24 @@ class Render(unittest.TestCase):
         self.assertNotIn("registries", self.worker_toml(self.renderer(win_doc()))["worker"])
         r = self.renderer(aws_doc(), {"windows_registry": dict(REGISTRY)})
         self.assertNotIn("registries", self.worker_toml(r)["worker"])
+
+    def test_copies_reaches_control_proxy_and_worker(self):
+        configs = self.renderer(win_doc(copies="fast")).deploy_configs()
+        roles = set()
+        for path, body in configs.items():
+            role = path.rsplit("/", 1)[1].removesuffix(".toml")
+            doc = tomllib.loads(body)
+            if role in ("control", "proxy", "worker"):
+                self.assertEqual(doc["windows"], {"copies": "fast"}, path)
+                roles.add(role)
+            else:
+                self.assertNotIn("windows", doc, path)
+        self.assertEqual(roles, {"control", "proxy", "worker"})
+
+    def test_no_copies_table_unless_set(self):
+        for doc in (win_doc(), aws_doc()):
+            for path, body in self.renderer(doc).deploy_configs().items():
+                self.assertNotIn("windows", tomllib.loads(body), path)
 
     def test_an_incomplete_registry_stops_the_render(self):
         with self.assertRaisesRegex(InstallError, r"\[windows_registry\] has no password"):

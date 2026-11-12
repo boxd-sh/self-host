@@ -11,6 +11,10 @@ needs Windows guests. What the installer does with it, every apply:
   [worker] registries in every worker.toml (the worker writes them for `docker pull`);
 - the proxies' security group or firewall: TCP 61000-65000, each Windows machine's RDP port
   (the proxy redirects the band to its RDP listener itself);
+- `copies`, when set, as [windows] copies in every control, proxy and worker config (boxd_raft
+  config.rs WindowsConfig: how a new snapshot or fork of a Windows machine is taken; control and
+  proxy refuse by it, the worker captures by it). Unset, the table is left out and boxd's default
+  (generalize) applies; a release that predates it ignores the table;
 - after the converge: `boxd-ctl image set-windows`, `cluster-config set|unset windows_kms`,
   `node windows-host <worker> on|off` for every worker, then `cluster-config set
   windows_licensing` (marks first: a switch to per-host with no marked worker refuses creates).
@@ -26,8 +30,12 @@ import shlex
 from . import ansible, assets, license
 from .util import InstallError, log
 
-KEYS = {"image", "kms", "licensing", "hosts"}
+KEYS = {"image", "kms", "licensing", "hosts", "copies"}
 LICENSING = ("per-vm", "per-host")
+# [windows] copies (boxd_raft config.rs WindowsCopies): "generalize" (boxd's default) or "fast".
+COPIES = ("generalize", "fast")
+# The node configs that read [windows] (the console and DNS don't).
+COPIES_ROLES = ("control", "proxy", "worker")
 FEATURE = "windows-guests"
 PROVIDER = "windows_registry"
 PROVIDER_KEYS = ("host", "username", "password")
@@ -152,6 +160,8 @@ def validate(doc: dict, errs: list[str], target: str | None) -> None:
             if licensing != "per-host":
                 errs.append('[windows].hosts is only for licensing = "per-host" (per VM, Windows '
                             "machines go to any worker)")
+    if "copies" in t and t["copies"] not in COPIES:
+        errs.append(f"[windows].copies must be one of {', '.join(COPIES)}, got {t['copies']!r}")
     if licensing == "per-host" and not hosts:
         errs.append('[windows] licensing = "per-host" needs hosts: the workers you licensed for '
                     "Windows (with none, every Windows create is refused)")
@@ -203,6 +213,14 @@ def worker_files(cfg, assets_root: str | None) -> list[dict]:
     if not on(cfg.doc) or not assets_root:
         return []
     return [{"src": rel, "dest": dest} for rel, dest, _ in FILES if assets.has_file(assets_root, rel)]
+
+
+def node_table(cfg, role: str) -> dict:
+    """[windows] for a control, proxy or worker config: `copies` as cluster.toml says, nothing when
+    it doesn't (boxd's default then, generalize) or for another role."""
+    if not on(cfg.doc) or role not in COPIES_ROLES or "copies" not in cfg.doc["windows"]:
+        return {}
+    return {"copies": cfg.doc["windows"]["copies"]}
 
 
 def registries(cfg) -> list[dict]:
