@@ -355,8 +355,6 @@ class Renderer:
         # Where the cluster runs, for the hourly report, and the node default
         # when telemetry is off (before the converge: no send before `off`).
         doc["telemetry"] = telemetry.control_table(self.cfg)
-        if t := windows.node_table(self.cfg, "control"):
-            doc["windows"] = t
         doc.update(self._shared_tables("control"))
         auto = self.cfg.table("automations")
         if auto:
@@ -426,8 +424,6 @@ class Renderer:
         doc["api"] = {"jwt_secret": self.jwt}
         if self.cfg.table("github"):
             doc["github"] = self._github_table()
-        if t := windows.node_table(self.cfg, "proxy"):
-            doc["windows"] = t
         doc.update(self._shared_tables("proxy"))
         return doc
 

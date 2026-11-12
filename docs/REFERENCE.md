@@ -386,7 +386,9 @@ image = "registry.example.com/boxd/windows-server-2025:2026-11"
 # - "fast": memory, devices and disk, never generalized. A copy resumes where its source was
 #   and only its network address changes, in seconds. It keeps its source's SID, computer
 #   name and KMS client ID: not for Active Directory members, and a KMS host counts the copies
-#   as one client.
+#   as one client. Only a running or hibernated machine's copy is fast, and only once the
+#   machine has booted with a release and an image built from it that have the copy's identity
+#   channel; any other copy (a suspended or stopped machine's) is generalized.
 # copies = "generalize"
 ```
 
@@ -412,9 +414,9 @@ credentials. Every `apply` then:
   set-windows`, `boxd-ctl cluster-config set windows_kms` and `windows_licensing`), and
   marks the workers in `hosts` as licensed Windows hosts and every other worker as not
   (`boxd-ctl node windows-host`), before it switches the licensing mode;
-- writes `copies` into every control, proxy and worker node's config (`[windows] copies`)
-  and restarts the nodes whose config changed. It decides how new copies are taken: a
-  snapshot taken before a change restores as what it is.
+- writes `copies` into every worker's config (`[windows] copies`) and restarts the workers
+  whose config changed. It decides how new copies are taken: a snapshot taken before a change
+  restores as what it is.
 
 Without `[windows]` nothing changes, and a Windows create is refused with a sentence that
 names what's missing. Removing `[windows]` later undoes nothing: the image, the settings

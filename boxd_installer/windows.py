@@ -11,10 +11,10 @@ needs Windows guests. What the installer does with it, every apply:
   [worker] registries in every worker.toml (the worker writes them for `docker pull`);
 - the proxies' security group or firewall: TCP 61000-65000, each Windows machine's RDP port
   (the proxy redirects the band to its RDP listener itself);
-- `copies`, when set, as [windows] copies in every control, proxy and worker config (boxd_raft
-  config.rs WindowsConfig: how a new snapshot or fork of a Windows machine is taken; control and
-  proxy refuse by it, the worker captures by it). Unset, the table is left out and boxd's default
-  (generalize) applies; a release that predates it ignores the table;
+- `copies`, when set, as [windows] copies in every worker config (boxd_raft config.rs
+  WindowsConfig: how a new snapshot or fork of a Windows machine is taken; the worker reads it at
+  its start, no other role does). Unset, the table is left out and boxd's default (generalize)
+  applies; a release that predates it ignores the table;
 - after the converge: `boxd-ctl image set-windows`, `cluster-config set|unset windows_kms`,
   `node windows-host <worker> on|off` for every worker, then `cluster-config set
   windows_licensing` (marks first: a switch to per-host with no marked worker refuses creates).
@@ -34,8 +34,8 @@ KEYS = {"image", "kms", "licensing", "hosts", "copies"}
 LICENSING = ("per-vm", "per-host")
 # [windows] copies (boxd_raft config.rs WindowsCopies): "generalize" (boxd's default) or "fast".
 COPIES = ("generalize", "fast")
-# The node configs that read [windows] (the console and DNS don't).
-COPIES_ROLES = ("control", "proxy", "worker")
+# The node configs that read [windows]: the worker takes the copies.
+COPIES_ROLES = ("worker",)
 FEATURE = "windows-guests"
 PROVIDER = "windows_registry"
 PROVIDER_KEYS = ("host", "username", "password")
@@ -216,8 +216,8 @@ def worker_files(cfg, assets_root: str | None) -> list[dict]:
 
 
 def node_table(cfg, role: str) -> dict:
-    """[windows] for a control, proxy or worker config: `copies` as cluster.toml says, nothing when
-    it doesn't (boxd's default then, generalize) or for another role."""
+    """[windows] for a worker config: `copies` as cluster.toml says, nothing when it doesn't
+    (boxd's default then, generalize) or for another role."""
     if not on(cfg.doc) or role not in COPIES_ROLES or "copies" not in cfg.doc["windows"]:
         return {}
     return {"copies": cfg.doc["windows"]["copies"]}

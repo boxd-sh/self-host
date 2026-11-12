@@ -237,18 +237,17 @@ class Render(unittest.TestCase):
         r = self.renderer(aws_doc(), {"windows_registry": dict(REGISTRY)})
         self.assertNotIn("registries", self.worker_toml(r)["worker"])
 
-    def test_copies_reaches_control_proxy_and_worker(self):
+    def test_copies_reaches_every_worker(self):
         configs = self.renderer(win_doc(copies="fast")).deploy_configs()
-        roles = set()
+        workers = 0
         for path, body in configs.items():
-            role = path.rsplit("/", 1)[1].removesuffix(".toml")
             doc = tomllib.loads(body)
-            if role in ("control", "proxy", "worker"):
+            if path.endswith("/worker.toml"):
                 self.assertEqual(doc["windows"], {"copies": "fast"}, path)
-                roles.add(role)
+                workers += 1
             else:
                 self.assertNotIn("windows", doc, path)
-        self.assertEqual(roles, {"control", "proxy", "worker"})
+        self.assertGreater(workers, 0)
 
     def test_no_copies_table_unless_set(self):
         for doc in (win_doc(), aws_doc()):
