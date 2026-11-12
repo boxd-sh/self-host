@@ -115,28 +115,36 @@ has the details, the variables a hook sees and the rules.
    the provider, download `FalconSensor_Windows.exe` from your Falcon console (Host setup and
    management → Sensor downloads) into `files/`, or add a `fetch` line that takes it from
    your own artifact store, with its SHA-256; CrowdStrike doesn't publish it.
-2. **Install it in the image** with your CID and `NO_START=1`, so the image's sensor never
-   registers. Each machine registers at its first boot, as its own host. By hand, in
-   `install.ps1`:
+2. **Install it in the image** with your CID and three options:
+   - `NO_START=1`: the image's sensor never registers; each machine registers at its first
+     boot, as its own host;
+   - `VDI=1`: a fork or a snapshot's copy notices it was cloned and registers as a new host;
+   - `ProvNoWait=1`: the build has no network, and without it the installer waits for
+     CrowdStrike's cloud.
+
+   Retry it: right after the image build's first logon the installer can fail (exit 28, or
+   1618 while Windows Installer is busy), and the same command a few minutes later succeeds.
+   By hand, in `install.ps1`:
    ```powershell
-   $p = Start-Process -FilePath (Need 'FalconSensor_Windows.exe') -Wait -PassThru -ArgumentList @(
-       '/install', '/quiet', '/norestart', 'CID=<your CID>', 'NO_START=1')
+   for ($try = 1; $try -le 10; $try++) {
+       $p = Start-Process -FilePath (Need 'FalconSensor_Windows.exe') -Wait -PassThru -ArgumentList @(
+           '/install', '/quiet', '/norestart', 'CID=<your CID>', 'NO_START=1', 'VDI=1', 'ProvNoWait=1')
+       if ($p.ExitCode -eq 0 -and (Get-Service CSAgent -ErrorAction SilentlyContinue)) { break }
+       Start-Sleep -Seconds 60
+   }
    if ($p.ExitCode -ne 0) { throw "the Falcon sensor's installer exited $($p.ExitCode)" }
    ```
    The CID is in the image, readable by every machine's administrators, as on any host you
    deploy the sensor to.
-3. **Copies.** A fork or a snapshot's copy starts with its source's agent ID (AID), so Falcon
-   would see both as one host. `on-clone.d/crowdstrike-falcon.ps1.example` clears the copied
-   AID before the copy reaches the network; rename it to `.ps1` to use it. The sensor protects
-   that setting: the hosts' **sensor update policy must have uninstall and maintenance
-   protection off**. With protection on, the sensor refuses the change, the hook fails, and
-   the copy stays off the network (boxd never shows it running) rather than come up as its
-   source. Either way Falcon sees the attempt as tampering with the sensor: a **High
-   "Defense Evasion via Disable or Modify Tools" detection** on the source host's name, for
-   every copy, unless you add an IOA exclusion for it (the hook runs from
-   `C:\ProgramData\boxd\boxd-boot.ps1`). Without the hook, copies come up with their source's
-   AID. Turning protection off and excluding the hook are your security team's calls: if
-   neither is acceptable, don't fork or snapshot machines with the sensor.
+3. **Copies.** A fork or a snapshot's copy starts with its source's agent ID (AID). With
+   `VDI=1` the sensor sorts it out by itself: on boxd, about two minutes after a fork booted,
+   the copy registered as a new host, and its source re-registered once under its own
+   hostname, with no hook and no detection. Without `VDI=1`, copies come up with their source's
+   AID. `on-clone.d/crowdstrike-falcon.ps1.example` is the other way, and a worse one: it clears
+   the copied AID before the copy reaches the network, but only when the hosts' sensor update
+   policy has uninstall and maintenance protection off. With protection on, the sensor refuses
+   and the copy stays off the network. Either way Falcon raises a **High "Defense Evasion via
+   Disable or Modify Tools" detection** for every copy, unless an IOA exclusion covers the hook.
 4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
    internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
    your cloud.
