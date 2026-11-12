@@ -52,10 +52,11 @@ licensed media.
 | Part | Where it comes from | What it holds |
 |---|---|---|
 | boxd's | the release bundle you install, so it always matches your cluster's version | the boxd agent (exec, files, RDP passwords, the coding-agent logins, `boxd` and `run` in the machine), the boot script that gives each machine its own name, address and SID, the virtio drivers, the terminal support (ConPTY), sysprep, and the packaging as an image |
-| yours | this directory | the software every machine starts with |
+| yours | this directory | the software every machine starts with (`fetch.sh`, `install.ps1`), and the hooks a copied machine runs (`on-clone.d/`) |
 
-The build runs boxd's setup first, then your `install.ps1`, then generalizes the image
-with sysprep, so every machine made from it gets its own identity.
+The build runs boxd's setup first, then your `install.ps1`, puts your `on-clone.d/` hooks in
+place, then generalizes the image with sysprep, so every machine made from it gets its own
+identity.
 
 ## Your software layer
 
@@ -92,9 +93,42 @@ signs Claude Code and Codex in with the user's connected accounts, and gives `gi
   them; the agent's GitHub wiring then does nothing.
 - **Move a tool forward:** its URL and SHA-256 in `fetch.sh`. The next image has it.
 
-Software that must differ per machine (domain joins, per-machine licences) doesn't
-belong here. It belongs in an on-clone hook, which runs on each new machine's first
-boot.
+What a copy of a machine must not inherit (an EDR agent's host ID, a monitoring agent's ID)
+belongs in an on-clone hook, below. A domain join happens once the machine is up: hooks run
+before it has a network.
+
+## Hooks on copies (`on-clone.d/`)
+
+A fork, or a machine made from a snapshot, starts from a copy of another machine's disk:
+the software on it has already run as that machine. Every `*.ps1` in `on-clone.d/` goes
+into the image (`C:\ProgramData\boxd\on-clone.d\`), and a copy runs them at its first
+boot, as SYSTEM, before it gets an address. A hook that fails keeps the copy off the network.
+A fresh machine from the image doesn't run them. [on-clone.d/README.md](on-clone.d/README.md)
+has the details, the variables a hook sees and the rules.
+
+## Example: CrowdStrike Falcon
+
+1. **The installer.** Download the Windows sensor (`WindowsSensor.exe`) from your Falcon
+   console (Host setup and management → Sensor downloads) and put it in `files/`, or add a
+   `fetch` line that takes it from your own artifact store, with its SHA-256. CrowdStrike
+   doesn't publish it.
+2. **Install it in the image,** in `install.ps1`, with your customer ID (CID, from the same
+   page) and `NO_START=1`, so the image's sensor never registers. Each machine registers at
+   its first boot, as its own host:
+   ```powershell
+   $p = Start-Process -FilePath (Need 'WindowsSensor.exe') -Wait -PassThru -ArgumentList @(
+       '/install', '/quiet', '/norestart', 'CID=<your CID>', 'NO_START=1')
+   if ($p.ExitCode -ne 0) { throw "the Falcon sensor's installer exited $($p.ExitCode)" }
+   ```
+   The CID is in the image, readable by every machine's administrators, as on any host you
+   deploy the sensor to.
+3. **Copies.** Rename `on-clone.d/crowdstrike-falcon.ps1.example` to `.ps1`: a fork or a
+   snapshot's copy clears the agent ID it copied, and registers as a new host. The sensor
+   update policy for these hosts must allow the change (uninstall and maintenance protection
+   off); otherwise the hook fails and the copy stays off the network.
+4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
+   internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
+   your cloud.
 
 ## Building and installing the image
 
@@ -107,7 +141,7 @@ boot.
 
 The command:
 1. builds the image on a host with KVM, with boxd's setup from your installed release, then
-   this directory's `install.ps1`, then sysprep;
+   this directory's `install.ps1` and `on-clone.d/` hooks, then sysprep;
 2. boots it once to check it (the agent answers, the machine reports ready);
 3. pushes it to your registry.
 

@@ -1,0 +1,29 @@
+# crowdstrike-falcon.ps1: a copied machine gets its own CrowdStrike Falcon agent ID (AID).
+#
+# A fork or a snapshot's copy starts from a disk whose sensor has already registered, so without
+# this every copy would show up in Falcon as its source. This clears the copied AID before the
+# machine reaches the network; the sensor registers again, as a new host, once the machine is up.
+#
+# With the sensor in the image (install.ps1, `WindowsSensor.exe /install /quiet /norestart
+# CID=<your CID> NO_START=1`), a fresh machine needs nothing here: NO_START=1 kept the image's sensor
+# from registering, and each machine registers at its first boot.
+#
+# The sensor protects its own settings: the host's sensor update policy must allow this change
+# (uninstall and maintenance protection off for these hosts), or the hook fails and the copy stays
+# off the network. Check the key against CrowdStrike's documentation for your sensor version.
+#
+# Rename to crowdstrike-falcon.ps1 to use it (on-clone.d/README.md).
+$ErrorActionPreference = 'Stop'
+$key = 'HKLM:\SYSTEM\CrowdStrike\{9b03c1d9-3138-44ed-9fae-d9f4c034b88d}\{16e0423f-7058-48c9-a204-725362b67639}\Default'
+
+if (-not (Test-Path $key)) {
+    "crowdstrike-falcon: no sensor settings on this machine, nothing to do"
+    exit 0
+}
+Remove-ItemProperty -Path $key -Name AG -ErrorAction SilentlyContinue
+if (Get-ItemProperty -Path $key -Name AG -ErrorAction SilentlyContinue) {
+    # The value is still there: the sensor's protection refused the change.
+    "crowdstrike-falcon: the copied agent ID (AG) could not be removed; check the sensor update policy"
+    exit 1
+}
+"crowdstrike-falcon: copied agent ID removed (copy of $env:BOXD_PREVIOUS_VM_ID)"
