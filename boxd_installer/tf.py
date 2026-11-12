@@ -110,6 +110,39 @@ def state_data_volumes(raw_state: dict) -> set[str]:
             and r.get("mode") == "managed"
             for inst in r.get("instances", []) if isinstance(inst.get("index_key"), str)}
 
+def network(cfg) -> tuple[str | None, dict]:
+    """Which VPC the cluster in the terraform state runs in, and the existing
+    VPC's and subnets' ids there. Needs `init`."""
+    res = _tf(cfg, "state", "pull", capture=True, quiet=True)
+    raw = json.loads(res.stdout or "{}")
+    return state_network(raw), state_network_ids(raw)
+
+def state_network(raw_state: dict) -> str | None:
+    """"created" (aws_vpc.vpc, the VPC terraform made), "existing"
+    (data.aws_vpc.existing, [aws] vpc_id) or None (no VPC in the state yet)."""
+    have = {(r.get("mode"), r.get("type"), r.get("name"))
+            for r in raw_state.get("resources", []) if r.get("instances")}
+    if ("managed", "aws_vpc", "vpc") in have:
+        return "created"
+    if ("data", "aws_vpc", "existing") in have:
+        return "existing"
+    return None
+
+# The data sources that read [aws] vpc_id's VPC and subnets (terraform/aws/main.tf).
+NETWORK_DATA = {"vpc_id": ("aws_vpc", "existing"), "private_subnet_id": ("aws_subnet", "private"),
+                "public_subnet_id": ("aws_subnet", "public")}
+
+def state_network_ids(raw_state: dict) -> dict:
+    """{vpc_id, private_subnet_id, public_subnet_id: id} for those the state holds."""
+    ids = {}
+    for r in raw_state.get("resources", []):
+        for key, (typ, name) in NETWORK_DATA.items():
+            if (r.get("mode"), r.get("type"), r.get("name")) == ("data", typ, name):
+                for inst in r.get("instances", []):
+                    if ident := (inst.get("attributes") or {}).get("id"):
+                        ids[key] = ident
+    return ids
+
 def init(cfg) -> None:
     _tf(cfg, "init", "-input=false", *clouds.get(cfg).backend_args(cfg))
 

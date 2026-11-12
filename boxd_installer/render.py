@@ -136,7 +136,7 @@ class Renderer:
             doc["secrets_kek"] = self.kek
         sr = storage_role or role
         doc["cluster"] = self._cluster_block(with_learners=(role != "console"))
-        doc["vrack"] = {"interface": self._iface(), "subnet": self.cfg.vpc_cidr}
+        doc["vrack"] = {"interface": self._iface(), "subnet": self.cfg.node_cidr}
         doc["storage"] = {
             "raft_dir": f"/var/lib/boxd/{sr}/raft",
             "state_db": f"/var/lib/boxd/{sr}/state.db",
@@ -628,7 +628,7 @@ class Renderer:
         if cfg.nodes_with("metrics"):
             lines += [
                 f"clickhouse_password: {self.state.clickhouse_password()}",
-                f"clickhouse_allowed_network: {cfg.vpc_cidr}",
+                f"clickhouse_allowed_network: {cfg.node_cidr}",
             ]
         # The worker role ships deploy-config/<worker>/bucket.toml (0600), or
         # removes a bucket file left from before.

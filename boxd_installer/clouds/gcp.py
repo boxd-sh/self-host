@@ -23,6 +23,10 @@ SA_ID_MAX = 30
 # GCS bucket names: <project>-<name>-storage, at most 63 chars.
 BUCKET_NAME_MAX = 63
 
+def required(table: dict) -> tuple[str, ...]:
+    """The [gcp] keys every cluster.toml needs (config._validate)."""
+    return REQUIRED
+
 def _auto_storage(doc: dict) -> bool:
     """[storage_engine] declared makes terraform create the cluster's bucket,
     a service account with access to it alone, and attach that account to the

@@ -1,9 +1,57 @@
 variable "region" { type = string }
 variable "availability_zone" { type = string }
 variable "cluster_name" { type = string }
-variable "vpc_cidr" { type = string }
-variable "public_subnet_cidr" { type = string }
-variable "private_subnet_cidr" { type = string }
+# The VPC the installer creates. null with vpc_id.
+variable "vpc_cidr" {
+  type    = string
+  default = null
+}
+variable "public_subnet_cidr" {
+  type    = string
+  default = null
+}
+variable "private_subnet_cidr" {
+  type    = string
+  default = null
+}
+
+# [aws] vpc_id: an existing VPC and its subnets instead (main.tf). The public
+# subnet only with public ingress; s3_endpoint_id only with bucket_access = "vpc".
+variable "vpc_id" {
+  type    = string
+  default = null
+  validation {
+    condition = var.vpc_id != null || (var.vpc_cidr != null && var.public_subnet_cidr != null
+    && var.private_subnet_cidr != null)
+    error_message = "Without vpc_id, vpc_cidr, public_subnet_cidr and private_subnet_cidr are required."
+  }
+  validation {
+    condition     = var.vpc_id == null || var.private_subnet_id != null
+    error_message = "vpc_id needs private_subnet_id."
+  }
+  validation {
+    condition = var.vpc_id == null || (var.vpc_cidr == null && var.public_subnet_cidr == null
+    && var.private_subnet_cidr == null)
+    error_message = "With vpc_id the CIDRs come from the existing VPC: leave vpc_cidr and the subnet CIDRs unset."
+  }
+  validation {
+    condition = var.vpc_id != null || (var.private_subnet_id == null && var.public_subnet_id == null
+    && var.s3_endpoint_id == null)
+    error_message = "private_subnet_id, public_subnet_id and s3_endpoint_id are only for an existing VPC (vpc_id)."
+  }
+}
+variable "private_subnet_id" {
+  type    = string
+  default = null
+}
+variable "public_subnet_id" {
+  type    = string
+  default = null
+}
+variable "s3_endpoint_id" {
+  type    = string
+  default = null
+}
 variable "ami" { type = string }
 
 variable "deploy_ssh_pubkey" { type = string }

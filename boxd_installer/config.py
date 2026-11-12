@@ -260,6 +260,11 @@ class Config:
         # "private": proxy/dns get no public IP and advertise their internal
         # ones (AWS only; clients come in over Twingate or similar).
         self.ingress: str = self.cloud.get("ingress", "public")
+        # Where the nodes are (vrack, ClickHouse): an existing VPC's private
+        # subnet when every node is in it, else the whole VPC.
+        self.node_cidr: str = (self.cloud["private_subnet_cidr"]
+                               if "vpc_id" in self.cloud and self.ingress == "private"
+                               else self.vpc_cidr)
 
     def _init_gke(self, doc: dict) -> None:
         """[gke]: one synthetic node per pod (clouds/gke.py topology_nodes), so
@@ -269,6 +274,7 @@ class Config:
         from .clouds import gke
         g = doc["gke"]
         self.vpc_cidr = g.get("vpc_cidr")
+        self.node_cidr = self.vpc_cidr
         # Routed only; the VNI range is unused there but every config carries it.
         self.network = {"vni_range_start": 100, "vni_range_end": 10000, "mode": "routed",
                         **doc.get("network", {})}
@@ -402,6 +408,9 @@ def _cloud_name(doc: dict) -> str:
 def load(path: str) -> Config:
     with open(path, "rb") as fh:
         doc = tomllib.load(fh)
+    # An existing VPC's CIDRs come from AWS, before anything checks them.
+    if isinstance(doc.get("aws"), dict) and "vpc_id" in doc["aws"]:
+        clouds.CLOUDS["aws"].existing_network(doc["aws"])
     _validate(doc)
     return Config(doc, os.path.dirname(os.path.abspath(path)))
 
@@ -432,7 +441,7 @@ def _validate(doc: dict) -> None:
 
     routed = doc.get("network", {}).get("mode") == "routed"
     for tbl, keys in (("cluster", ("name", "zone", "assets_version")),
-                      (cloud, tmod.CLOUD_REQUIRED if tmod else mod.REQUIRED),
+                      (cloud, tmod.CLOUD_REQUIRED if tmod else mod.required(doc[cloud])),
                       ("network", ("pool",) if tmod else ("vni_range_start", "vni_range_end")
                        + (("pool",) if routed else ("bridge_subnet_base",)))):
         missing = [k for k in keys if k not in doc.get(tbl, {})]

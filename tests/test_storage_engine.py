@@ -639,7 +639,8 @@ class ApplyOrder(unittest.TestCase):
              mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,
-                                 instance_types=mock.Mock(return_value={})), \
+                                 instance_types=mock.Mock(return_value={}),
+                                 network=mock.Mock(return_value=(None, {}))), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  converge=calls.converge, wait_for_leader=mock.DEFAULT,
