@@ -7,7 +7,7 @@ import ssl
 import tomllib
 import urllib.parse
 
-from . import clouds, private_services
+from . import clouds, private_services, windows
 from .util import InstallError
 
 KNOWN_ROLES = {"control", "worker", "proxy", "console", "dns", "metrics"}
@@ -16,7 +16,7 @@ SERVICE_TABLES = {
     "github", "google", "oidc", "resend", "analytics", "backups",
     "automations", "templates", "snapshot_archive", "storage_engine",
 }
-INSTALLER_TABLES = ({"cluster", "network", "nodes", "license", "telemetry", "images"}
+INSTALLER_TABLES = ({"cluster", "network", "nodes", "license", "telemetry", "images", "windows"}
                     | set(clouds.CLOUDS) | set(clouds.TARGETS))
 ACME_CAS = ("gts", "zerossl", "local")
 PRIVATE_NET = ipaddress.ip_network("10.0.0.0/8")
@@ -112,7 +112,8 @@ class Node:
         return self.roles[0]
 
 PROVIDER_TABLES = {"google", "github", "oidc", "resend", "analytics",
-                   "backups", "automations", "snapshot_archive", "storage_engine"}
+                   "backups", "automations", "snapshot_archive", "storage_engine",
+                   windows.PROVIDER}
 # [oidc] (boxd `OidcConfig`): single sign-on through the company's OpenID
 # Connect provider. Everything but the secret goes in cluster.toml; the
 # secret goes in the providers config, which validate never reads.
@@ -324,6 +325,7 @@ def validate_providers(doc: dict) -> None:
             errs.append(f"[automations].{k} is derived by the installer — remove it")
     if isinstance(doc.get("storage_engine"), dict):
         errs += validate_storage_store(doc["storage_engine"])
+    errs += windows.provider_errors(doc)
     if errs:
         raise InstallError("providers config invalid:\n  " + "\n  ".join(errs))
 
@@ -458,6 +460,7 @@ def _validate(doc: dict) -> None:
         _validate_nodes_and_network(doc, cloud, mod, errs)
     _validate_worker_and_services(doc, cloud, mod, errs)
     private_services.validate(doc, errs, target)
+    windows.validate(doc, errs, target)
     if not tmod:
         mod.validate(doc, errs)
     _validate_templates(doc, errs)

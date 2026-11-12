@@ -4,7 +4,7 @@ works offline; --fake-tf substitutes a hand-written outputs file (tests)."""
 import json
 import os
 
-from . import clouds, license
+from . import clouds, license, windows
 from .util import InstallError, log, run
 
 def _tf_env(cfg) -> dict:
@@ -55,6 +55,8 @@ def build_tfvars(cfg, state, existing: dict[str, str] | None = None,
     tfvars = clouds.get(cfg).tfvars(cfg, state, nodes)
     # Checked against the real worker types in terraform/<cloud>/machine_sizes.tf.
     tfvars["machine_sizes"] = cfg.machine_sizes()
+    # The proxies' RDP band (61000-65000), for Windows machines.
+    tfvars["windows_rdp"] = windows.on(cfg.doc)
     return tfvars
 
 def write_tfvars(cfg, state, out_dir: str, existing: dict[str, str] | None = None,

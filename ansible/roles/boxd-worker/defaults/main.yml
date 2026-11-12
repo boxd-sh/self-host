@@ -4,3 +4,6 @@ boxd_worker_ksm: false
 # CIDR:PORT bounds, one per target or subnet. Non-empty installs the relay (boxd-relay.service,
 # user boxd-relay); the installer sets it (render.py group_vars).
 boxd_private_service_bounds: []
+# [windows]: the release files the worker role copies into the data dir, each { src: path in the
+# release, dest: path under the data dir }; the installer sets it (render.py group_vars).
+boxd_windows_files: []

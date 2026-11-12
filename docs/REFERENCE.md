@@ -378,26 +378,44 @@ image = "registry.example.com/boxd/windows-server-2025:2026-11"
 # Optional. How you license Windows with Microsoft: "per-vm" (default: Windows machines go
 # to any worker) or "per-host" (only to the workers in `hosts`, the ones you licensed).
 # licensing = "per-vm"
-# hosts = ["worker-1", "worker-2"]
+# hosts = ["boxd-worker-1", "boxd-worker-2"]   # names from [[nodes]]
 ```
 
+`image` needs a tag or a digest. `[windows]` needs `[license] key_file` with a key that
+includes Windows guests; `validate` and `apply` check the key before anything else.
+`[windows]` is not supported on `[gke]` yet.
+
 The registry's pull credentials are a secret: `./boxd-install providers edit` stores them
-(`[windows_registry]`, [Providers](#providers-secrets)), never `cluster.toml`. Every `apply` then:
+(`[windows_registry]`, [Providers](#providers-secrets)), never `cluster.toml`
+(`[worker] registries` there is refused). `apply` warns when the image's registry has no
+credentials. Every `apply` then:
 
 - installs on each worker what Windows machines need from the release bundle: the UEFI
-  firmware they boot, and the Windows builds of the in-VM `boxd` and `run` CLIs;
+  firmware they boot, at `/mnt/boxd-data/uefi.fd`, and the Windows builds of the in-VM
+  `boxd` and `run` CLIs when the release has them, in `/mnt/boxd-data/sdk/`. A worker reads
+  them when it starts, so `apply` restarts the workers whose files changed. A release
+  without the firmware is refused;
 - writes the registry's credentials into each worker's config (`[[worker.registries]]`);
+- opens TCP 61000–65000 on the proxies, each Windows machine's RDP port: on AWS from
+  `[aws] ingress_cidrs`, like the other proxy ports; on GCP from anywhere. On bare metal,
+  open them in your own firewall;
 - sets the cluster's Windows image, KMS host and licensing mode (`boxd-ctl image
   set-windows`, `boxd-ctl cluster-config set windows_kms` and `windows_licensing`), and
-  marks `hosts` as licensed Windows hosts (`boxd-ctl node windows-host`).
+  marks the workers in `hosts` as licensed Windows hosts and every other worker as not
+  (`boxd-ctl node windows-host`), before it switches the licensing mode.
 
 Without `[windows]` nothing changes, and a Windows create is refused with a sentence that
-names what's missing.
+names what's missing. Removing `[windows]` later undoes nothing: the image, the settings
+and the files on the workers stay, so Windows machines that exist keep working. To stop new
+Windows machines, `boxd-ctl image unset-windows` (OPERATIONS.md).
 
 **Workers.** A Windows machine boots UEFI firmware on the worker's KVM, like any machine. A
-worker pulls the image (about 40 GB) at its first Windows machine, which takes some
-minutes; later creates take about 30 seconds. A fresh machine reboots once inside Windows
-Setup before it's ready.
+worker pulls the image at its first Windows machine, then copies its disk out: about 12
+minutes for a 7 GB image with a 32 GB disk, inside the 15 minutes boxd gives a create.
+Later creates on that worker take about a minute. A fresh machine reboots once inside
+Windows Setup before it's ready. The pulled image stays in Docker on the worker's boot disk
+(about 34 GB for that image; workers get 200 GB unless `boot_disk_gb` says otherwise), and
+its disk on the data disk (about 9 GB allocated).
 
 ### Telemetry
 

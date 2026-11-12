@@ -766,7 +766,14 @@ boxd-ctl placement explain --os windows                # where a Windows machine
 ```
 
 A change in `cluster.toml` and an `apply` is the lasting way: the next apply sets what
-`[windows]` says again.
+`[windows]` says again. `[windows] hosts` takes the names in `[[nodes]]`; `boxd-ctl` knows
+the same workers as `worker-N` (`node list`), N the worker's `node_id` in
+`/etc/boxd/worker.toml`. `cluster-config get` of a key that was never set prints
+`windows_licensing is unset` and exits non-zero: per-vm, the default.
+
+**Turning Windows off.** Removing `[windows]` from `cluster.toml` changes nothing on the
+cluster. `boxd-ctl image unset-windows` refuses new Windows machines at once; the ones that
+exist keep running, and keep the firmware they need on every worker.
 
 **A new image.** Build it (win-img/README.md), push it under a new tag, put the tag in
 `[windows] image` and apply. Machines that exist keep their disks; new machines boot the

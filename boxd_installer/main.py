@@ -9,7 +9,8 @@ import shutil as _shutil
 import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
-               oidc, private_services, remote_state, render, storage_engine, telemetry, tf)
+               oidc, private_services, remote_state, render, storage_engine, telemetry, tf,
+               windows)
 from .state import Allocation, State, generate_egress_ca
 from .util import InstallError, log
 
@@ -71,7 +72,7 @@ def cmd_validate(args) -> int:
             "project or account can collide; rename them before the first apply.")
     # A [license].key_file that is missing or not a key stops here. No
     # terraform state here: workers without machine_type count as new ones.
-    if errs := telemetry.errors(cfg):
+    if errs := telemetry.errors(cfg) + windows.errors(cfg):
         raise InstallError("; ".join(errs))
     warnings = (license.free_tier_warnings(cfg, assume_new=True) + telemetry.warnings(cfg)
                 + config.network_warnings(cfg) + config.data_disk_warnings(cfg)
@@ -130,7 +131,7 @@ def _apply(cfg, args) -> int:
     # Before anything else: a [license].key_file that is missing or not a
     # key stops the apply; it never falls back to the free tier.
     key = license.key_path(cfg)
-    if errs := telemetry.errors(cfg):
+    if errs := telemetry.errors(cfg) + windows.errors(cfg):
         raise InstallError("; ".join(errs))
     state = State(args.state_dir)
     # The render would refuse a half-configured [oidc] only after terraform.
@@ -148,6 +149,7 @@ def _apply(cfg, args) -> int:
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     check_storage_bundle(cfg, assets_root)
     check_relay_bundle(cfg, assets_root)
+    windows.check_bundle(cfg, assets_root)
     check_private_service_bridges(cfg, state)
     # Before terraform: once the storage catalog is on, the engine and its
     # bucket are one-way (storage_engine.check_guard).
@@ -179,7 +181,7 @@ def _apply(cfg, args) -> int:
                                       if cfg.table(t)}):
         log(f"warning: {inert}")
     for warning in (config.network_warnings(cfg) + config.data_disk_warnings(cfg)
-                    + config.storage_bucket_warnings(cfg)):
+                    + config.storage_bucket_warnings(cfg) + windows.registry_warnings(cfg)):
         log(f"warning: {warning}")
     composio.sync_auth_configs(cfg, state, assets_root)
     ensure_egress_ca(cfg, state)
@@ -249,6 +251,8 @@ def _finish(cfg, args, state, r, key, storage, assets_root: str,
         log("telemetry: [telemetry] enabled is not set; the cluster's setting is left as it is")
     else:
         ansible.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
+    # Every worker runs the new release and has the firmware now ([windows]).
+    windows.configure(cfg, r.alloc)
 
     image, tag = assets.computer_image(assets_root)
     if image_override:
@@ -611,6 +615,15 @@ PROVIDERS_TEMPLATE = """\
 # access_key = ""
 # secret_key = ""
 # virtual_hosted_style = false
+
+# The private registry your Windows image is in ([windows] in cluster.toml;
+# win-img/README.md). Every worker gets these pull credentials. host is the
+# registry's host as the image reference names it. Artifact Registry: username
+# "_json_key_base64" and a service account's JSON key, base64, as password.
+# [windows_registry]
+# host = "registry.example.com"
+# username = ""
+# password = ""
 
 # Composio integrations. auth_configs/webhook_secret/connect_domain are
 # derived by the installer — only the keys below belong here.
