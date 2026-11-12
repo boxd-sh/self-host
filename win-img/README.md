@@ -108,24 +108,30 @@ has the details, the variables a hook sees and the rules.
 
 ## Example: CrowdStrike Falcon
 
-1. **The installer.** Download the Windows sensor (`WindowsSensor.exe`) from your Falcon
-   console (Host setup and management → Sensor downloads) and put it in `files/`, or add a
-   `fetch` line that takes it from your own artifact store, with its SHA-256. CrowdStrike
-   doesn't publish it.
-2. **Install it in the image,** in `install.ps1`, with your customer ID (CID, from the same
-   page) and `NO_START=1`, so the image's sensor never registers. Each machine registers at
-   its first boot, as its own host:
+1. **The sensor and your CID.** With a `[crowdstrike]` provider (a Falcon API client with
+   **Sensor download: Read**, docs/REFERENCE.md "Providers"), `windows-image build` downloads
+   the newest Windows sensor through Falcon's API, checks its SHA-256 against the one Falcon
+   lists, and reads your CID; the build installs it as below and you write nothing. Without
+   the provider, download `FalconSensor_Windows.exe` from your Falcon console (Host setup and
+   management → Sensor downloads) into `files/`, or add a `fetch` line that takes it from
+   your own artifact store, with its SHA-256; CrowdStrike doesn't publish it.
+2. **Install it in the image** with your CID and `NO_START=1`, so the image's sensor never
+   registers. Each machine registers at its first boot, as its own host. By hand, in
+   `install.ps1`:
    ```powershell
-   $p = Start-Process -FilePath (Need 'WindowsSensor.exe') -Wait -PassThru -ArgumentList @(
+   $p = Start-Process -FilePath (Need 'FalconSensor_Windows.exe') -Wait -PassThru -ArgumentList @(
        '/install', '/quiet', '/norestart', 'CID=<your CID>', 'NO_START=1')
    if ($p.ExitCode -ne 0) { throw "the Falcon sensor's installer exited $($p.ExitCode)" }
    ```
    The CID is in the image, readable by every machine's administrators, as on any host you
    deploy the sensor to.
-3. **Copies.** Rename `on-clone.d/crowdstrike-falcon.ps1.example` to `.ps1`: a fork or a
-   snapshot's copy clears the agent ID it copied, and registers as a new host. The sensor
-   update policy for these hosts must allow the change (uninstall and maintenance protection
-   off); otherwise the hook fails and the copy stays off the network.
+3. **Copies.** A fork or a snapshot's copy starts with its source's agent ID (AID), so Falcon
+   would see both as one host. `on-clone.d/crowdstrike-falcon.ps1.example` clears the copied
+   AID before the copy reaches the network; rename it to `.ps1` to use it. The sensor protects
+   that setting: the hosts' **sensor update policy must have uninstall and maintenance
+   protection off**. With protection on, the sensor refuses the change, the hook fails, and
+   the copy stays off the network (boxd never shows it running) rather than come up as its
+   source. Without the hook, copies come up with their source's AID.
 4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
    internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
    your cloud.

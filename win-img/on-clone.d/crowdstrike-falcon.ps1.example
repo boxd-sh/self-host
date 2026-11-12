@@ -4,13 +4,14 @@
 # this every copy would show up in Falcon as its source. This clears the copied AID before the
 # machine reaches the network; the sensor registers again, as a new host, once the machine is up.
 #
-# With the sensor in the image (install.ps1, `WindowsSensor.exe /install /quiet /norestart
-# CID=<your CID> NO_START=1`), a fresh machine needs nothing here: NO_START=1 kept the image's sensor
-# from registering, and each machine registers at its first boot.
+# With the sensor in the image (`FalconSensor_Windows.exe /install /quiet /norestart CID=<your CID>
+# NO_START=1`), a fresh machine needs nothing here: NO_START=1 kept the image's sensor from
+# registering, and each machine registers at its first boot.
 #
-# The sensor protects its own settings: the host's sensor update policy must allow this change
-# (uninstall and maintenance protection off for these hosts), or the hook fails and the copy stays
-# off the network. Check the key against CrowdStrike's documentation for your sensor version.
+# The sensor protects its own settings: the hosts' sensor update policy must have uninstall and
+# maintenance protection off. With it on, the sensor refuses this change even to SYSTEM (sensor
+# 8.11, the policy's defaults), the hook fails and the copy stays off the network. Check the key
+# against CrowdStrike's documentation for your sensor version.
 #
 # Rename to crowdstrike-falcon.ps1 to use it (on-clone.d/README.md).
 $ErrorActionPreference = 'Stop'
