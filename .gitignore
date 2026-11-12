@@ -28,3 +28,6 @@ license.key
 /*.pem
 /*.key
 /secrets/
+
+# Windows image files, downloaded by win-img/fetch.sh
+win-img/files/

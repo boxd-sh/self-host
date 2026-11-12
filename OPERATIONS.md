@@ -26,6 +26,7 @@ organised by task and adds the context the help can't.
 - [Snapshot archive](#snapshot-archive)
 - [Bucket storage](#bucket-storage)
 - [Private services](#private-services)
+- [Windows machines](#windows-machines)
 - [Troubleshooting](#troubleshooting)
 - [Logs and support](#logs-and-support)
 - [Ask boxd first](#ask-boxd-first)
@@ -747,6 +748,45 @@ count what the relay's user tried to reach outside the declared services:
 relay the new list; connections to an unchanged service stay up, a removed
 or changed one's are closed. The relay itself restarts only when a new
 release changes its binary.
+
+## Windows machines
+
+For clusters whose license key has Windows guests. Setting it up:
+[win-img/README.md](win-img/README.md) and docs/REFERENCE.md "Windows machines".
+
+What the installer set, and what you can check or change by hand:
+
+```sh
+boxd-ctl image get-windows                             # the cluster's Windows image
+boxd-ctl cluster-config get windows_kms                # the KMS host machines activate against
+boxd-ctl cluster-config get windows_licensing          # per-vm (default) or per-host
+boxd-ctl node list                                     # each worker's UEFI firmware and Windows-host mark
+boxd-ctl node windows-host worker-5 on                 # per host: a worker you licensed
+boxd-ctl placement explain --os windows                # where a Windows machine would go, and why not elsewhere
+```
+
+A change in `cluster.toml` and an `apply` is the lasting way: the next apply sets what
+`[windows]` says again.
+
+**A new image.** Build it (win-img/README.md), push it under a new tag, put the tag in
+`[windows] image` and apply. Machines that exist keep their disks; new machines boot the
+new image. Workers pull it at their next Windows machine.
+
+**Licensing per host.** Under `per-host`, Windows machines run only on the workers you
+marked, and a Windows create is refused while no marked worker has the UEFI firmware.
+Machines already running on a worker you unmark stay where they are. Count what you license from `boxd-ctl node list`
+and the machine listings, which show each machine's OS and vCPUs.
+
+**A Windows machine stays `pending`.** A fresh machine runs Windows Setup and reboots once
+before it reports ready: a minute or so. A worker's first Windows machine also waits for
+the image pull, several minutes. boxd gives a create 15 minutes, then fails it. Look in the
+worker's log (`journalctl -u boxd-worker`) for the machine's id: the image pull, the
+firmware boot and the guest's ready report are each logged.
+
+**Activation.** At every boot the boxd agent points the machine at `windows_kms` and
+activates it (`slmgr`). A machine that can't reach the KMS host keeps working, and Windows
+reminds its users that it isn't activated.
+Check from inside: `boxd machine connect <machine>`, then `slmgr /dli`.
 
 ## Troubleshooting
 

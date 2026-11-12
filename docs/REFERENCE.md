@@ -355,6 +355,50 @@ A worker that already exists keeps the type it has, with or without a key:
 the license never resizes a running worker (boxd never stops a machine
 because of the license). Set `machine_type` to change it.
 
+### Windows machines
+
+With a license key that has Windows guests, users create Windows Server machines next to
+Linux ones (`boxd machine new --os windows`). They reach them over RDP (each machine has
+its own RDP port on the proxy; `boxd machine rdp reset-password` makes a password and shows
+it once) and over `boxd machine connect` (a PowerShell session). Windows machines
+hibernate and wake like Linux machines. Their snapshots, forks and checkpoints hold the disk
+alone; a snapshot or fork is generalized, so every copy gets its own identity.
+
+You build the cluster's Windows image yourself, from your own Windows media, and push it to
+your registry: [win-img/README.md](../win-img/README.md) (where to get an ISO, what goes in
+the image, the build). Then name it here:
+
+```toml
+[windows]
+# The image you built and pushed (win-img/README.md).
+image = "registry.example.com/boxd/windows-server-2025:2026-11"
+# Optional. Your KMS host, host or host:port. Every Windows machine activates against it at
+# boot (volume-licensing and SPLA images; an evaluation image can't).
+# kms = "kms.example.com:1688"
+# Optional. How you license Windows with Microsoft: "per-vm" (default: Windows machines go
+# to any worker) or "per-host" (only to the workers in `hosts`, the ones you licensed).
+# licensing = "per-vm"
+# hosts = ["worker-1", "worker-2"]
+```
+
+The registry's pull credentials are a secret: `./boxd-install providers edit` stores them,
+never `cluster.toml`. Every `apply` then:
+
+- installs on each worker what Windows machines need from the release bundle: the UEFI
+  firmware they boot, and the Windows builds of the in-VM `boxd` and `run` CLIs;
+- writes the registry's credentials into each worker's config (`[[worker.registries]]`);
+- sets the cluster's Windows image, KMS host and licensing mode (`boxd-ctl image
+  set-windows`, `boxd-ctl cluster-config set windows_kms` and `windows_licensing`), and
+  marks `hosts` as licensed Windows hosts (`boxd-ctl node windows-host`).
+
+Without `[windows]` nothing changes, and a Windows create is refused with a sentence that
+names what's missing.
+
+**Workers.** A Windows machine boots UEFI firmware on the worker's KVM, like any machine. A
+worker pulls the image (about 40 GB) at its first Windows machine, which takes some
+minutes; later creates take about 30 seconds. A fresh machine reboots once inside Windows
+Setup before it's ready.
+
 ### Telemetry
 
 Every boxd cluster sends boxd usage reports over HTTPS, from the control
