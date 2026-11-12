@@ -22,6 +22,10 @@ DEFAULT_STATE_DIR = "metal-state"
 # Keys only the cloud adapters use: on metal the hosts are given, not sized.
 CLOUD_NODE_KEYS = ("machine_type", "data_disk_gb", "boot_disk_gb")
 
+def required(table: dict) -> tuple[str, ...]:
+    """The [metal] keys every cluster.toml needs (config._validate)."""
+    return REQUIRED
+
 def _ip_error(value) -> str | None:
     try:
         if not isinstance(value, str) or ipaddress.ip_address(value).version != 4:

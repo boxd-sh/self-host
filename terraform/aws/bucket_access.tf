@@ -17,12 +17,18 @@ locals {
 # provider leaves endpoint routes out of the inline route blocks, so they
 # don't show up as drift on the route tables.
 resource "aws_vpc_endpoint" "s3" {
-  count             = length(local.vpc_only_buckets) > 0 ? 1 : 0
-  vpc_id            = aws_vpc.vpc.id
+  count             = length(local.vpc_only_buckets) > 0 && local.create_network ? 1 : 0
+  vpc_id            = local.vpc_id
   service_name      = "com.amazonaws.${var.region}.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
+  route_table_ids   = local.route_table_ids
   tags              = { Name = "${var.cluster_name}-s3" }
+}
+
+# An existing VPC keeps its own S3 gateway endpoint ([aws] s3_endpoint_id):
+# a second one on the same route tables is refused.
+locals {
+  s3_endpoint_id = local.create_network ? one(aws_vpc_endpoint.s3[*].id) : var.s3_endpoint_id
 }
 
 resource "aws_s3_bucket_policy" "vpc_only" {
@@ -43,7 +49,7 @@ resource "aws_s3_bucket_policy" "vpc_only" {
         "s3:ListBucketVersions", "s3:ListBucketMultipartUploads",
       "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts", "s3:RestoreObject"]
       Resource  = [each.value.arn, "${each.value.arn}/*"]
-      Condition = { StringNotEquals = { "aws:SourceVpce" = aws_vpc_endpoint.s3[0].id } }
+      Condition = { StringNotEquals = { "aws:SourceVpce" = local.s3_endpoint_id } }
     }]
   })
   # S3 rejects a bucket policy while the public access block is being written.

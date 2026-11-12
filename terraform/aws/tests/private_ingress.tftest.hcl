@@ -51,7 +51,7 @@ run "private" {
     error_message = "private ingress must not allocate Elastic IPs"
   }
   assert {
-    condition     = aws_instance.node["control-0"].subnet_id == aws_subnet.private.id
+    condition     = aws_instance.node["control-0"].subnet_id == aws_subnet.private[0].id
     error_message = "the proxy node must be in the private subnet"
   }
   assert {
@@ -63,6 +63,11 @@ run "private" {
     condition = alltrue([for r in aws_security_group.dns_public.ingress :
     r.cidr_blocks == tolist(["0.0.0.0/0"])])
     error_message = "dns_public must not be narrowed by ingress_cidrs"
+  }
+  assert {
+    condition = alltrue([for r in aws_security_group.internal.ingress :
+    r.cidr_blocks == tolist(["10.70.0.0/16"]) && !r.self])
+    error_message = "in the VPC terraform makes, the internal SG admits the VPC's CIDR"
   }
 }
 
@@ -81,7 +86,7 @@ run "public" {
     error_message = "the public proxy/dns node gets an Elastic IP"
   }
   assert {
-    condition     = aws_instance.node["control-0"].subnet_id == aws_subnet.public.id
+    condition     = aws_instance.node["control-0"].subnet_id == aws_subnet.public[0].id
     error_message = "the public proxy node must be in the public subnet"
   }
   assert {

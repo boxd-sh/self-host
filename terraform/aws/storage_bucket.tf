@@ -108,13 +108,14 @@ resource "aws_iam_user_policy" "storage" {
   })
 }
 
-# Workers reach the zonal endpoint through the VPC, not the NAT gateway.
+# Workers reach the zonal endpoint through the VPC, not the NAT gateway. Not
+# in an existing VPC: its route tables aren't the installer's to change.
 resource "aws_vpc_endpoint" "s3express" {
-  count             = local.storage_express ? 1 : 0
-  vpc_id            = aws_vpc.vpc.id
+  count             = local.storage_express && local.create_network ? 1 : 0
+  vpc_id            = local.vpc_id
   service_name      = "com.amazonaws.${var.region}.s3express"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
+  route_table_ids   = local.route_table_ids
   tags              = { Name = "${var.cluster_name}-s3express" }
 }
 

@@ -868,7 +868,8 @@ directory once it's stored. `.gitignore` keeps `*.pem`, `*.key` and
 custom domains and org domains. Point it at your internal resolver so it
 sees your internal zones; left unset it asks `8.8.8.8`, which can't. On AWS
 that's the VPC's resolver: `vpc_cidr`'s base address + 2 (`10.70.0.2` for
-`10.70.0.0/16`).
+`10.70.0.0/16`), or [an existing VPC's](INSTALL.md#into-an-existing-vpc)
+CIDR's.
 
 **No corporate CA yet?** For an evaluation only, make a throwaway root and
 an intermediate constrained to your zone, and trust the root on the laptops
@@ -1717,7 +1718,8 @@ Terraform then makes `<cluster>-storage-<account>--<az-id>--x-s3` (the AZ id
 of `availability_zone`, such as `euc1-az2`), an IAM user whose key may only
 open sessions on it (`s3express:CreateSession`), the abort-incomplete-multipart
 lifecycle rule, and an `s3express` gateway endpoint so workers reach it
-through the VPC. Workers' `bucket.toml` gets `s3_express = true`, and boxd
+through the VPC (not [in an existing VPC](INSTALL.md#into-an-existing-vpc),
+whose route tables `apply` leaves alone). Workers' `bucket.toml` gets `s3_express = true`, and boxd
 talks to the zonal endpoint with session credentials. Express is offered in
 some availability zones only: check that yours has it before the first apply.
 

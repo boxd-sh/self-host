@@ -63,6 +63,7 @@ def cmd_validate(args) -> int:
     cfg = config.load(args.cluster)
     if clouds.kubernetes(cfg):
         return _validate_gke(cfg)
+    check_existing_vpc(cfg)
     # A warning, not an error: renaming a node replaces its instance, so a
     # running cluster keeps the names it has.
     if odd := [n.name for n in cfg.nodes if not n.name.startswith(f"{cfg.name}-")]:
@@ -83,6 +84,13 @@ def cmd_validate(args) -> int:
     if "oidc" in cfg.doc:
         print(oidc.check_discovery(cfg.doc["oidc"]))
     return 0
+
+def check_existing_vpc(cfg) -> None:
+    """[aws] vpc_id: the routes, DNS and S3 endpoint the nodes need (validate
+    and apply only, not every command that loads cluster.toml)."""
+    if cfg.cloud_name == "aws" and "vpc_id" in cfg.cloud:
+        if errs := clouds.CLOUDS["aws"].network_errors(cfg.cloud):
+            raise InstallError("the existing VPC can't take the cluster:\n  " + "\n  ".join(errs))
 
 def _validate_gke(cfg) -> int:
     """[gke]: the file, the worker pool against the license, and what can
@@ -132,6 +140,7 @@ def _apply(cfg, args) -> int:
     key = license.key_path(cfg)
     if errs := telemetry.errors(cfg):
         raise InstallError("; ".join(errs))
+    check_existing_vpc(cfg)
     state = State(args.state_dir)
     # The render would refuse a half-configured [oidc] only after terraform.
     oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
@@ -159,6 +168,9 @@ def _apply(cfg, args) -> int:
         tf.init(cfg)
         # A worker that exists keeps its type: the license never resizes one.
         existing = tf.instance_types(cfg)
+        # A cluster that exists stays in the kind of VPC it has.
+        if cfg.cloud_name == "aws":
+            clouds.CLOUDS["aws"].check_network_switch(cfg, *tf.network(cfg))
         # A worker that exists keeps its kind of data disk (EBS or instance store).
         if cfg.cloud_name == "aws" and any(n.name in existing for n in cfg.nodes_with("worker")):
             clouds.CLOUDS["aws"].check_data_disk_switch(cfg, set(existing), tf.data_volumes(cfg))

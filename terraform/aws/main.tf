@@ -12,7 +12,36 @@ locals {
 
 data "aws_partition" "current" {}
 
+# [aws] vpc_id: the cluster goes into an existing VPC and its subnets, and
+# none of the network below is created. Their CIDRs come from the VPC.
+data "aws_vpc" "existing" {
+  count = local.create_network ? 0 : 1
+  id    = var.vpc_id
+}
+
+data "aws_subnet" "private" {
+  count = local.create_network ? 0 : 1
+  id    = var.private_subnet_id
+}
+
+data "aws_subnet" "public" {
+  count = !local.create_network && var.public_subnet_id != null ? 1 : 0
+  id    = var.public_subnet_id
+}
+
+locals {
+  create_network    = var.vpc_id == null
+  vpc_id            = local.create_network ? aws_vpc.vpc[0].id : data.aws_vpc.existing[0].id
+  vpc_cidr          = local.create_network ? var.vpc_cidr : data.aws_vpc.existing[0].cidr_block
+  private_subnet_id = local.create_network ? aws_subnet.private[0].id : data.aws_subnet.private[0].id
+  # null in an existing VPC with private ingress: no node is public there.
+  public_subnet_id = local.create_network ? aws_subnet.public[0].id : one(data.aws_subnet.public[*].id)
+  # The installer's own route tables, for its S3 gateway endpoints.
+  route_table_ids = local.create_network ? [aws_route_table.public[0].id, aws_route_table.private[0].id] : []
+}
+
 resource "aws_vpc" "vpc" {
+  count                = local.create_network ? 1 : 0
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
@@ -20,72 +49,135 @@ resource "aws_vpc" "vpc" {
 }
 
 resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.vpc.id
+  count  = local.create_network ? 1 : 0
+  vpc_id = aws_vpc.vpc[0].id
   tags   = { Name = "${var.cluster_name}-igw" }
 }
 
 resource "aws_subnet" "public" {
-  vpc_id            = aws_vpc.vpc.id
+  count             = local.create_network ? 1 : 0
+  vpc_id            = aws_vpc.vpc[0].id
   cidr_block        = var.public_subnet_cidr
   availability_zone = var.availability_zone
   tags              = { Name = "${var.cluster_name}-public" }
 }
 
 resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.vpc.id
+  count             = local.create_network ? 1 : 0
+  vpc_id            = aws_vpc.vpc[0].id
   cidr_block        = var.private_subnet_cidr
   availability_zone = var.availability_zone
   tags              = { Name = "${var.cluster_name}-private" }
 }
 
 resource "aws_eip" "nat" {
+  count  = local.create_network ? 1 : 0
   domain = "vpc"
   tags   = { Name = "${var.cluster_name}-nat" }
 }
 
 resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public.id
+  count         = local.create_network ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
+  subnet_id     = aws_subnet.public[0].id
   tags          = { Name = "${var.cluster_name}-nat" }
   depends_on    = [aws_internet_gateway.igw]
 }
 
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.vpc.id
+  count  = local.create_network ? 1 : 0
+  vpc_id = aws_vpc.vpc[0].id
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
+    gateway_id = aws_internet_gateway.igw[0].id
   }
   tags = { Name = "${var.cluster_name}-public" }
 }
 
 resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.vpc.id
+  count  = local.create_network ? 1 : 0
+  vpc_id = aws_vpc.vpc[0].id
   route {
     cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat.id
+    nat_gateway_id = aws_nat_gateway.nat[0].id
   }
   tags = { Name = "${var.cluster_name}-private" }
 }
 
 resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
+  count          = local.create_network ? 1 : 0
+  subnet_id      = aws_subnet.public[0].id
+  route_table_id = aws_route_table.public[0].id
 }
 
 resource "aws_route_table_association" "private" {
-  subnet_id      = aws_subnet.private.id
-  route_table_id = aws_route_table.private.id
+  count          = local.create_network ? 1 : 0
+  subnet_id      = aws_subnet.private[0].id
+  route_table_id = aws_route_table.private[0].id
 }
 
+# Clusters from before vpc_id keep their network: the same resources, now counted.
+moved {
+  from = aws_vpc.vpc
+  to   = aws_vpc.vpc[0]
+}
+
+moved {
+  from = aws_internet_gateway.igw
+  to   = aws_internet_gateway.igw[0]
+}
+
+moved {
+  from = aws_subnet.public
+  to   = aws_subnet.public[0]
+}
+
+moved {
+  from = aws_subnet.private
+  to   = aws_subnet.private[0]
+}
+
+moved {
+  from = aws_eip.nat
+  to   = aws_eip.nat[0]
+}
+
+moved {
+  from = aws_nat_gateway.nat
+  to   = aws_nat_gateway.nat[0]
+}
+
+moved {
+  from = aws_route_table.public
+  to   = aws_route_table.public[0]
+}
+
+moved {
+  from = aws_route_table.private
+  to   = aws_route_table.private[0]
+}
+
+moved {
+  from = aws_route_table_association.public
+  to   = aws_route_table_association.public[0]
+}
+
+moved {
+  from = aws_route_table_association.private
+  to   = aws_route_table_association.private[0]
+}
+
+# Node to node. In an existing VPC only the cluster's own nodes (self): the
+# VPC's other workloads reach the proxy through ingress_cidrs, nothing else.
 resource "aws_security_group" "internal" {
   name   = "${var.cluster_name}-internal"
-  vpc_id = aws_vpc.vpc.id
+  vpc_id = local.vpc_id
   ingress {
     protocol    = "-1"
     from_port   = 0
     to_port     = 0
-    cidr_blocks = [var.vpc_cidr]
+    cidr_blocks = local.create_network ? [local.vpc_cidr] : []
+    self        = !local.create_network
   }
   egress {
     protocol    = "-1"
@@ -97,7 +189,7 @@ resource "aws_security_group" "internal" {
 
 resource "aws_security_group" "proxy_public" {
   name   = "${var.cluster_name}-proxy-public"
-  vpc_id = aws_vpc.vpc.id
+  vpc_id = local.vpc_id
   dynamic "ingress" {
     for_each = [[80, 80], [443, 443], [9443, 9443], [10000, 30000], [40000, 60000]]
     content {
@@ -111,13 +203,13 @@ resource "aws_security_group" "proxy_public" {
 
 resource "aws_security_group" "dns_public" {
   name   = "${var.cluster_name}-dns-public"
-  vpc_id = aws_vpc.vpc.id
+  vpc_id = local.vpc_id
   dynamic "ingress" {
     for_each = ["tcp", "udp"]
     content {
-      protocol    = ingress.value
-      from_port   = 53
-      to_port     = 53
+      protocol  = ingress.value
+      from_port = 53
+      to_port   = 53
       # Not ingress_cidrs: an authoritative nameserver is queried by
       # resolvers and ACME validators, not by the users ingress_cidrs names.
       # With private ingress the dns nodes have no public IP anyway.
@@ -174,7 +266,7 @@ resource "aws_instance" "node" {
 
   ami                  = var.ami
   instance_type        = local.instance_types[each.key]
-  subnet_id            = each.value.public_ip ? aws_subnet.public.id : aws_subnet.private.id
+  subnet_id            = each.value.public_ip ? local.public_subnet_id : local.private_subnet_id
   private_ip           = each.value.internal_ip
   key_name             = aws_key_pair.deploy.key_name
   iam_instance_profile = aws_iam_instance_profile.node.name
@@ -209,6 +301,10 @@ resource "aws_instance" "node" {
 
   lifecycle {
     ignore_changes = [ami]
+    precondition {
+      condition     = !each.value.public_ip || local.public_subnet_id != null
+      error_message = "A public proxy/dns node in an existing VPC needs public_subnet_id."
+    }
   }
 }
 

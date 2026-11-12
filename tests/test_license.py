@@ -455,19 +455,22 @@ class ApplyOrder(LicenseCluster):
     """`apply`: the key file is checked before terraform; the warnings come
     before the plan; the key is installed before the templates are seeded."""
 
-    def apply(self, doc: dict, existing: dict, calls: mock.Mock | None = None) -> mock.Mock:
+    def apply(self, doc: dict, existing: dict, calls: mock.Mock | None = None,
+              network: str | None = None, network_ids: dict | None = None) -> mock.Mock:
         cfg = config.Config(doc, self.dir)
         calls = calls or mock.Mock()
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
         with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
-                                 render=mock.DEFAULT, storage_engine=mock.DEFAULT), \
+                                 render=mock.DEFAULT, storage_engine=mock.DEFAULT,
+                                 check_existing_vpc=calls.check_existing_vpc), \
              mock.patch.multiple(main.tf, init=calls.tf_init, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=calls.write_tfvars,
                                  instance_types=mock.Mock(return_value=existing),
                                  # The example's workers are on EBS.
-                                 data_volumes=mock.Mock(return_value=set(existing))), \
+                                 data_volumes=mock.Mock(return_value=set(existing)),
+                                 network=mock.Mock(return_value=(network, network_ids or {}))), \
              mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
@@ -540,6 +543,40 @@ class ApplyOrder(LicenseCluster):
         with self.assertRaises(InstallError) as e:
             self.apply(doc, {AWS_WORKER: "m8i.8xlarge"}, calls)
         self.assertIn("runs on an EBS data disk", str(e.exception))
+        self.assertNotIn("tf_plan", self.names(calls))
+
+    def test_network_switch_stops_before_the_plan(self):
+        """A cluster in the VPC apply made, now given [aws] vpc_id: refused
+        before terraform plans that VPC away."""
+        doc = without_type(aws_doc(), key_file=False)
+        doc["aws"]["vpc_id"] = "vpc-0abc"
+        calls = mock.Mock()
+        with self.assertRaises(InstallError) as e:
+            self.apply(doc, {AWS_WORKER: "m8i.8xlarge"}, calls, network="created")
+        self.assertIn("runs in the VPC apply made", str(e.exception))
+        self.assertNotIn("tf_plan", self.names(calls))
+
+    def test_existing_vpc_checked_before_terraform(self):
+        calls = mock.Mock()
+        calls.check_existing_vpc.side_effect = InstallError("the existing VPC can't take it")
+        with self.assertRaises(InstallError):
+            self.apply(without_type(aws_doc(), key_file=False), {}, calls)
+        self.assertIn("check_existing_vpc", self.names(calls))
+        self.assertNotIn("tf_init", self.names(calls))
+
+    def test_subnet_swap_stops_before_the_plan(self):
+        """A cluster in an existing VPC, now naming another private subnet:
+        refused before terraform plans every node's replacement."""
+        doc = without_type(aws_doc(), key_file=False)
+        doc["aws"].update(vpc_id="vpc-0abc", private_subnet_id="subnet-0new",
+                          public_subnet_id="subnet-0pub")
+        calls = mock.Mock()
+        with self.assertRaises(InstallError) as e:
+            self.apply(doc, {AWS_WORKER: "m8i.8xlarge"}, calls, network="existing",
+                       network_ids={"vpc_id": "vpc-0abc", "private_subnet_id": "subnet-0old",
+                                    "public_subnet_id": "subnet-0pub"})
+        self.assertIn("[aws].private_subnet_id subnet-0new (the cluster is in subnet-0old)",
+                      str(e.exception))
         self.assertNotIn("tf_plan", self.names(calls))
 
     def test_missing_key_file_stops_before_terraform(self):
