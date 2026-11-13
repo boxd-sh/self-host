@@ -43,6 +43,18 @@ def two_workers(doc: dict) -> dict:
     return doc
 
 
+class Example(unittest.TestCase):
+    def test_the_aws_windows_example_is_valid(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "examples", "aws-windows", "cluster.toml")
+        with open(path, "rb") as fh:
+            doc = tomllib.load(fh)
+        self.assertEqual(validate(doc), "")
+        self.assertEqual(doc["windows"]["copies"], "generalize")
+        self.assertEqual(doc["license"]["key_file"], "license.key")
+        self.assertIsNone(windows.image_error(doc["windows"]["image"]))
+
+
 class Validation(unittest.TestCase):
     def test_the_documented_shapes_are_valid(self):
         self.assertEqual(validate(win_doc()), "")

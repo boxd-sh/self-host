@@ -171,7 +171,8 @@ The command:
 2. boots it once to check it (the agent answers, the machine reports ready);
 3. pushes it to your registry.
 
-Then name it in `cluster.toml` and apply (docs/REFERENCE.md "Windows machines"). Your
+Then name it in `cluster.toml` and apply (docs/REFERENCE.md "Windows machines"; a whole AWS
+cluster with Windows machines: `examples/aws-windows/cluster.toml`). Your
 workers pull it at their first Windows machine. After a boxd upgrade, build the image
 again: boxd's part of the image comes from the release, and new Windows machines get what
 the release adds to them. Machines made from an older image keep working.

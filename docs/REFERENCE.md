@@ -366,7 +366,8 @@ alone; a snapshot or fork is generalized, so every copy gets its own identity.
 
 You build the cluster's Windows image yourself, from your own Windows media, and push it to
 your registry: [win-img/README.md](../win-img/README.md) (where to get an ISO, what goes in
-the image, the build). Then name it here:
+the image, the build). Then name it here (a whole AWS cluster with Windows machines:
+[examples/aws-windows/cluster.toml](../examples/aws-windows/cluster.toml)):
 
 ```toml
 [windows]
