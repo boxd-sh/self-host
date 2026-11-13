@@ -127,6 +127,21 @@ class State:
         self.save()
         return n
 
+    def removed_members(self, cfg) -> dict[str, dict[str, int]]:
+        """The Raft members this state has an id for that cluster.toml no
+        longer lists, as {node name: {role: node id}}: a node taken out of
+        the file, or one that lost a Raft role. Nothing in the cluster
+        forgets them on its own (a missing proxy keeps its machines), so
+        apply warns and asks before taking them out."""
+        present = {f"{n.name}/{role}" for role in RAFT_PORT for n in cfg.nodes_with(role)}
+        out: dict[str, dict[str, int]] = {}
+        for key, node_id in self.data.get("node_ids", {}).items():
+            name, _, role = key.rpartition("/")
+            if role in RAFT_PORT and key not in present:
+                out.setdefault(name, {})[role] = node_id
+        return {name: dict(sorted(roles.items(), key=lambda kv: ROLE_ID_ORDER.index(kv[0])))
+                for name, roles in sorted(out.items())}
+
     def retire_node_id(self, key: str) -> int | None:
         """Forget the id of `<node name>/<role>` for good (a GKE worker whose
         ordinal was removed): the name gets a new id if it comes back, and no
