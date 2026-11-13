@@ -76,7 +76,10 @@ resource "google_compute_firewall" "proxy_public" {
   target_tags   = ["proxy"]
   allow {
     protocol = "tcp"
-    ports    = ["80", "443", "9443", "10000-30000", "40000-60000"]
+    # With [windows], each Windows machine's RDP port too (the proxy redirects the
+    # band to its own RDP listener, which stays closed from outside).
+    ports = concat(["80", "443", "9443", "10000-30000", "40000-60000"],
+    var.windows_rdp ? ["61000-65000"] : [])
   }
 }
 

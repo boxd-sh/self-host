@@ -191,7 +191,10 @@ resource "aws_security_group" "proxy_public" {
   name   = "${var.cluster_name}-proxy-public"
   vpc_id = local.vpc_id
   dynamic "ingress" {
-    for_each = [[80, 80], [443, 443], [9443, 9443], [10000, 30000], [40000, 60000]]
+    # With [windows], each Windows machine's RDP port too (61000-65000); the proxy
+    # redirects the band to its own RDP listener, which stays closed from outside.
+    for_each = concat([[80, 80], [443, 443], [9443, 9443], [10000, 30000], [40000, 60000]],
+    var.windows_rdp ? [[61000, 65000]] : [])
     content {
       protocol    = "tcp"
       from_port   = ingress.value[0]

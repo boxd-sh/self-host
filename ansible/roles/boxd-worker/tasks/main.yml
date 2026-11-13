@@ -660,6 +660,23 @@
     mode: preserve
   notify: restart boxd service
 
+# [windows] (boxd_installer/windows.py): the UEFI firmware Windows machines boot, at [paths]
+# firmware's default, and the Windows builds of the in-VM CLIs, which a Windows machine's agent
+# installs from the worker, when the release has them. The worker hashes the firmware and reads
+# the CLIs at its start, so a change restarts it. Without [windows] the list is empty, and files
+# from an earlier apply stay: Windows machines that exist keep booting.
+- name: Copy what Windows machines need from the release
+  boxd_copy:
+    src: "{{ boxd_assets_dir }}/{{ item.src }}"
+    dest: "{{ boxd_data_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ boxd_windows_files }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: restart boxd service
+
 - name: Ship the automations toolkit registry
   # The per-toolkit artifact the worker selects each org's bundle out of.
   # Without it a worker with [automations] configured logs "configured but no

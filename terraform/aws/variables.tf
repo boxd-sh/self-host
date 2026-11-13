@@ -78,6 +78,13 @@ variable "ingress_cidrs" {
   default = ["0.0.0.0/0"]
 }
 
+# [windows] in cluster.toml: the proxies take each Windows machine's RDP port
+# (TCP 61000-65000) from ingress_cidrs too.
+variable "windows_rdp" {
+  type    = bool
+  default = false
+}
+
 variable "instance_type_defaults" {
   type = map(string)
   default = {

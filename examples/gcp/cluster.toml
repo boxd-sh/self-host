@@ -148,6 +148,15 @@ data_disk_gb = 500                       # required on workers: VM disks live he
 # -----END CERTIFICATE-----
 # """
 
+# Windows Server machines next to the Linux ones (docs/REFERENCE.md "Windows
+# machines"; needs a license key with windows-guests). You build the image
+# from your own Windows media and push it to your registry (win-img/README.md);
+# its pull credentials go in the providers config ([windows_registry]).
+# [windows]
+# image = "registry.example.com/boxd/windows-server-2025:2026-11"
+# kms = "kms.example.com:1688"              # your KMS host, for volume-licensing media
+# licensing = "per-vm"                      # or "per-host", with hosts = [<[[nodes]] names>]
+
 # ============================================================== 4. LEAVE AS IS
 
 [network]

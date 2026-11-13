@@ -537,7 +537,8 @@ node registered (or `apply` fails, naming the ones that didn't).
 - the VPC, both subnets, an internet gateway and a NAT gateway (none of them
   [in an existing VPC](#into-an-existing-vpc));
 - security groups: internal allow-all; proxy ports 80/443/9443/10000-30000/40000-60000
-  from `ingress_cidrs` (default anywhere); dns 53 from anywhere; no inbound SSH anywhere;
+  (and 61000-65000 with `[windows]`) from `ingress_cidrs` (default anywhere); dns 53 from
+  anywhere; no inbound SSH anywhere;
 - an SSM instance profile;
 - Elastic IPs for proxy and dns nodes (none with private ingress);
 - gp3 data volumes for workers (12k IOPS / 500 MiB/s by default);
@@ -591,7 +592,7 @@ the worker (two nodes can't share an address).
   internet, which a private cluster can't answer, so `validate` refuses
   `ingress = "private"` with ZeroSSL.
 - **`ingress_cidrs`** is who may reach the proxy ports (80, 443, 9443,
-  10000-30000, 40000-60000). It defaults to `vpc_cidr` in private mode,
+  10000-30000, 40000-60000, and with `[windows]` 61000-65000). It defaults to `vpc_cidr` in private mode,
   where the Twingate connector lives, and to `0.0.0.0/0` in public mode. Add
   the CIDR of anything that dials the proxy from outside the VPC (a peered
   VPC, a Direct Connect range). IPv4 CIDRs only. dns (53) is not restricted
@@ -797,12 +798,12 @@ the internet on:
 
 | Node | Ports |
 |---|---|
-| proxy | TCP 80, 443, 9443, 10000–30000, 40000–60000 |
+| proxy | TCP 80, 443, 9443, 10000–30000, 40000–60000 (and 61000–65000 with `[windows]`) |
 | dns | TCP and UDP 53 |
 
 Port 22 stays your host's own sshd. The proxy takes per-VM SSH on
-10000–30000, HTTPS on 443, the API the CLI uses on 9443, and raw TCP ports
-on 40000–60000.
+10000–30000, HTTPS on 443, the API the CLI uses on 9443, raw TCP ports
+on 40000–60000, and Windows machines' RDP on 61000–65000.
 
 **Use dedicated hosts.** Besides the kernel and the disk, `apply` installs
 Docker on workers, sets sysctls and transparent hugepages, adds iptables
