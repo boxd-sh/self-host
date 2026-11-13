@@ -200,6 +200,7 @@ class ApplyPassesTheSetting(Isolated):
              mock.patch.object(main, "log"), redirect_stdout(io.StringIO()):
             main.assets.computer_image.return_value = ("computer", "v1")
             main.State.return_value.load_providers.return_value = {}
+            main.State.return_value.removed_members.return_value = {}
             main.license.free_tier_warnings.return_value = []
             main._apply(cfg, args)
         return calls.set_telemetry
@@ -235,6 +236,7 @@ class ApplyPassesTheSetting(Isolated):
              mock.patch.object(main, "log"), redirect_stdout(io.StringIO()):
             main.assets.computer_image.return_value = ("computer", "v1")
             main.State.return_value.load_providers.return_value = {}
+            main.State.return_value.removed_members.return_value = {}
             main.license.free_tier_warnings.return_value = []
             main.render.Renderer.return_value.render_all.return_value = {"rendered": "x"}
             main._apply(cfg, args)

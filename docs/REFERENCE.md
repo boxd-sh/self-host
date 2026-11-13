@@ -15,7 +15,10 @@ node). Roles can share a node.
 
 - **Node names** become instance names: start them with the cluster name, so
   two clusters in one project or account can't collide (`validate` warns
-  otherwise). Renaming a node later replaces its instance.
+  otherwise). Renaming a node later replaces its instance, so for a control,
+  worker, proxy or nameserver node `apply` treats it as a node removed: it
+  warns and asks first
+  ([OPERATIONS.md, "Ask boxd first"](../OPERATIONS.md#ask-boxd-first)).
 - **Machine types** have defaults per role. `machine_type` and `boot_disk_gb`
   are per-node overrides. Workers must set `data_disk_gb`, because VM disks
   live there. On AWS a worker can use its local NVMe drives instead:

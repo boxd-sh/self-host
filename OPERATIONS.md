@@ -334,7 +334,12 @@ boxd-ctl node mark-dead worker-1
 
 Taking the node out of the cluster for good (`remove-peer`, then deleting it
 from `cluster.toml`) has steps that must happen in order on every node:
-[ask boxd first](#ask-boxd-first).
+[ask boxd first](#ask-boxd-first). When `cluster.toml` has dropped a control,
+worker, proxy or nameserver node (or one of those roles), `apply` prints what
+removing it breaks and the commands to run first, with the node's ids, and
+goes on only when you answer yes (`apply --auto-approve`, or `-y`, answers
+yes up front, for a run without a terminal). After that it doesn't ask about
+the node again.
 
 **Pinning a user to a worker.** That user's new machines land only on the
 pinned worker:
@@ -863,7 +868,12 @@ These are safe only in a particular order, or can't be undone:
 
 - Removing any node from the cluster (`remove-peer`, `node remove`, or
   deleting it from `cluster.toml`). Raft node ids must never be reused, and
-  peers keep dialling a removed node until restarted without it.
+  peers keep dialling a removed node until restarted without it. A proxy
+  node can't be removed yet: each machine resolves to the proxy it was
+  placed on and keeps its SSH port there, and boxd can't move machines to
+  another proxy. `apply` warns and asks before it takes out a node that
+  `cluster.toml` no longer lists; answer no unless the steps it prints are
+  done.
 - Going back to an older `assets_version`. A newer version may have migrated
   stored state that an older one can't read.
 - Restarting `boxd-worker` on a worker whose boot disk is full.
