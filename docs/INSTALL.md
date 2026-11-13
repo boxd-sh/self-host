@@ -534,9 +534,11 @@ leader. That's expected; the restart fixes it, and the next line says every
 node registered (or `apply` fails, naming the ones that didn't).
 
 **What `apply` creates on AWS:**
-- the VPC, both subnets, an internet gateway and a NAT gateway;
+- the VPC, both subnets, an internet gateway and a NAT gateway (none of them
+  [in an existing VPC](#into-an-existing-vpc));
 - security groups: internal allow-all; proxy ports 80/443/9443/10000-30000/40000-60000
-  from `ingress_cidrs` (default anywhere); dns 53 from anywhere; no inbound SSH anywhere;
+  (and 61000-65000 with `[windows]`) from `ingress_cidrs` (default anywhere); dns 53 from
+  anywhere; no inbound SSH anywhere;
 - an SSM instance profile;
 - Elastic IPs for proxy and dns nodes (none with private ingress);
 - gp3 data volumes for workers (12k IOPS / 500 MiB/s by default);
@@ -590,7 +592,7 @@ the worker (two nodes can't share an address).
   internet, which a private cluster can't answer, so `validate` refuses
   `ingress = "private"` with ZeroSSL.
 - **`ingress_cidrs`** is who may reach the proxy ports (80, 443, 9443,
-  10000-30000, 40000-60000). It defaults to `vpc_cidr` in private mode,
+  10000-30000, 40000-60000, and with `[windows]` 61000-65000). It defaults to `vpc_cidr` in private mode,
   where the Twingate connector lives, and to `0.0.0.0/0` in public mode. Add
   the CIDR of anything that dials the proxy from outside the VPC (a peered
   VPC, a Direct Connect range). IPv4 CIDRs only. dns (53) is not restricted
@@ -675,6 +677,82 @@ bucket before [Tearing down](REFERENCE.md#tearing-down), do it from a node
 ([SSH to nodes](REFERENCE.md#ssh-to-nodes), then `aws s3 rm --recursive`), or set
 `bucket_access = "anywhere"` and `apply` first.
 
+### Into an existing VPC
+
+To put the cluster in a VPC you already run, name it and its subnets instead
+of the CIDRs:
+
+```toml
+[aws]
+vpc_id            = "vpc-0123456789abcdef0"
+private_subnet_id = "subnet-0123456789abcdef0"  # every node with private ingress
+# public_subnet_id = "subnet-…"                 # public ingress: proxy and dns nodes
+```
+
+`apply` then creates no VPC, subnet, internet gateway, NAT gateway, route
+table or S3 gateway endpoint, and changes none of yours. What it still
+creates: the security groups (in your VPC), the instances, their disks and
+Elastic IPs, the SSM instance profile and the buckets.
+
+- **CIDRs come from AWS.** Every command that reads `cluster.toml`
+  (`validate`, `apply`, `render`, `state`, `destroy`, …) reads the VPC's and
+  the subnets' CIDRs (`aws ec2 describe-vpcs`, `describe-subnets`), so each
+  needs your AWS login. They're used where `vpc_cidr` and the subnet CIDRs
+  would be: `ingress_cidrs` defaults to the VPC's CIDR in private mode, and
+  boxd treats it as the cluster's private network (with private ingress,
+  the private subnet's CIDR: see below). Don't
+  set `vpc_cidr`, `public_subnet_cidr` or `private_subnet_cidr` as well:
+  `validate` refuses the mix. The VPC must be inside `10.0.0.0/8`, as
+  `vpc_cidr` must, and its resolver is its CIDR's base address + 2, for
+  `dns_verify_resolver` (`validate` prints both).
+- **The primary CIDR only.** The subnets must be in the VPC's primary CIDR;
+  `validate` refuses one in a secondary CIDR. The default private-mode
+  `ingress_cidrs` is the primary CIDR too: list secondary ones in
+  `ingress_cidrs` if clients come from there.
+- **Subnets.** Private ingress needs only `private_subnet_id`; public ingress
+  needs `public_subnet_id` too. Both must be in the VPC and in
+  `availability_zone`. The private subnet must already reach the internet
+  (a `0.0.0.0/0` route, to a NAT gateway or similar), the public one
+  through an internet gateway (`0.0.0.0/0` to an `igw-…`), and the VPC must
+  have DNS support on: `validate` and `apply` check all three
+  (`aws ec2 describe-route-tables`, `describe-vpc-attribute`), on the
+  subnet's own route table or else the VPC's main one.
+  Every `internal_ip` must be a free address in its node's subnet:
+  `validate` checks the subnet, not whether something else holds the
+  address, so pick ones no ENI uses (`aws ec2 describe-network-interfaces
+  --filters Name=subnet-id,Values=…`).
+- **S3 endpoints.** `apply` adds no gateway endpoint to your route tables, so
+  with [`bucket_access = "vpc"`](#buckets-only-inside-the-vpc) name the
+  VPC's own S3 gateway endpoint, which must be available and on the route
+  table of every subnet the cluster uses (`validate` and `apply` check,
+  with `aws ec2 describe-vpc-endpoints`). Its endpoint policy must also let
+  the nodes reach the cluster's buckets; nothing checks that, and a
+  restrictive one shows up only when a node can't read its bucket:
+
+  ```toml
+  s3_endpoint_id = "vpce-0123456789abcdef0"
+  ```
+
+  With [`storage_bucket_type = "express"`](REFERENCE.md#s3-express-storage-bucket)
+  workers reach the bucket through the NAT gateway unless you add an
+  `s3express` gateway endpoint yourself.
+- **Only the cluster's nodes reach each other.** In a VPC `apply` makes, the
+  internal security group admits the whole VPC; in an existing one it admits
+  only its own members, so the VPC's other workloads reach the cluster only
+  on the proxy ports from `ingress_cidrs` (and dns 53). With private
+  ingress, boxd's private network and the ClickHouse allow-list are the
+  private subnet's CIDR rather than the whole VPC's.
+- **Security group names.** `apply` names them `<cluster>-internal`,
+  `<cluster>-proxy-public` and `<cluster>-dns-public`. A group of the same
+  name already in the VPC makes `apply` fail: pick another cluster name.
+
+A cluster can't move between a VPC `apply` made and an existing one, or to
+another existing VPC or subnet: that would destroy the network its nodes
+are in, or replace every node (instance-store workers lose their data), so
+`apply` refuses, before any plan, when `vpc_id`, `private_subnet_id` or
+`public_subnet_id` doesn't match how the cluster was installed. Install it
+as a new cluster instead.
+
 ---
 
 ## Install on bare metal
@@ -720,12 +798,12 @@ the internet on:
 
 | Node | Ports |
 |---|---|
-| proxy | TCP 80, 443, 9443, 10000–30000, 40000–60000 |
+| proxy | TCP 80, 443, 9443, 10000–30000, 40000–60000 (and 61000–65000 with `[windows]`) |
 | dns | TCP and UDP 53 |
 
 Port 22 stays your host's own sshd. The proxy takes per-VM SSH on
-10000–30000, HTTPS on 443, the API the CLI uses on 9443, and raw TCP ports
-on 40000–60000.
+10000–30000, HTTPS on 443, the API the CLI uses on 9443, raw TCP ports
+on 40000–60000, and Windows machines' RDP on 61000–65000.
 
 **Use dedicated hosts.** Besides the kernel and the disk, `apply` installs
 Docker on workers, sets sysctls and transparent hugepages, adds iptables

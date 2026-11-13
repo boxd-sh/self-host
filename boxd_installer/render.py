@@ -4,7 +4,7 @@ from cluster.toml + allocation + terraform outputs.
 Projection map — which cluster.toml service tables reach which service —
 mirrors how the boxd binaries share one BoxdConfig schema.
 """
-from . import clouds, config, local_ca, private_services, telemetry, toml_emit
+from . import clouds, config, local_ca, private_services, telemetry, toml_emit, windows
 from .config import OIDC_REQUIRED, resolver_addr, rust_trim
 from .util import InstallError, log
 
@@ -136,7 +136,7 @@ class Renderer:
             doc["secrets_kek"] = self.kek
         sr = storage_role or role
         doc["cluster"] = self._cluster_block(with_learners=(role != "console"))
-        doc["vrack"] = {"interface": self._iface(), "subnet": self.cfg.vpc_cidr}
+        doc["vrack"] = {"interface": self._iface(), "subnet": self.cfg.node_cidr}
         doc["storage"] = {
             "raft_dir": f"/var/lib/boxd/{sr}/raft",
             "state_db": f"/var/lib/boxd/{sr}/state.db",
@@ -513,7 +513,13 @@ class Renderer:
             worker.setdefault("templates", "both")
         if services := self.private_services():
             worker["private_services"] = services
+        # The private registry the Windows image is in ([windows] and the providers config's
+        # [windows_registry]): the worker writes it for `docker pull` at its start.
+        if regs := windows.registries(self.cfg):
+            worker["registries"] = regs
         doc["worker"] = worker
+        if t := windows.node_table(self.cfg, "worker"):
+            doc["windows"] = t
         doc["api"] = {"jwt_secret": self.jwt}
         if self.cfg.table("github"):
             doc["github"] = {"client_id": "", "client_secret": "",
@@ -628,7 +634,7 @@ class Renderer:
         if cfg.nodes_with("metrics"):
             lines += [
                 f"clickhouse_password: {self.state.clickhouse_password()}",
-                f"clickhouse_allowed_network: {cfg.vpc_cidr}",
+                f"clickhouse_allowed_network: {cfg.node_cidr}",
             ]
         # The worker role ships deploy-config/<worker>/bucket.toml (0600), or
         # removes a bucket file left from before.
@@ -642,6 +648,11 @@ class Renderer:
         bounds = private_services.firewall_bounds(private_services.declared(cfg.doc))
         lines.append("boxd_private_service_bounds: ["
                      + ", ".join(f'"{b}"' for b in bounds) + "]")
+        # [windows]: what the worker role copies from the release into the data dir (the UEFI
+        # firmware, the Windows CLIs when the release has them). Empty: nothing.
+        lines.append("boxd_windows_files: ["
+                     + ", ".join(f'{{ src: "{f["src"]}", dest: "{f["dest"]}" }}'
+                                 for f in windows.worker_files(cfg, self.assets_root)) + "]")
         if self._routed():
             # No VXLAN mesh: boxd_workers (the bridge workers) is empty.
             lines += ["", "boxd_network_mode: routed", f"boxd_routed_pool: {cfg.pool}",

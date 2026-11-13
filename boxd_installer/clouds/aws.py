@@ -3,12 +3,17 @@ terraform + installer state, ZeroSSL as the default ACME CA (an AWS cluster
 must not depend on a GCP project, which GTS key minting needs)."""
 import base64
 import ipaddress
+import json
 import os
 
-from ..util import InstallError, run
+from ..util import InstallError, log, run
 
 REQUIRED = ("region", "availability_zone", "vpc_cidr", "public_subnet_cidr",
             "private_subnet_cidr", "state_bucket")
+# [aws] vpc_id: an existing VPC and subnets instead of the ones terraform
+# makes. Their CIDRs are read from AWS (existing_network), never written here.
+NETWORK_CIDRS = ("vpc_cidr", "public_subnet_cidr", "private_subnet_cidr")
+EXISTING_VPC_KEYS = ("vpc_id", "private_subnet_id", "public_subnet_id", "s3_endpoint_id")
 # None: the NIC is read from each host (the device holding its internal_ip;
 # render.IFACE_PLACEHOLDER). AWS names it ens5 on some instance types and
 # enp39s0 on others (m8i), so no one name is right.
@@ -36,6 +41,201 @@ def _public(raw_node: dict, ingress: str) -> bool:
     and every node in private ingress, egresses via NAT."""
     return ingress == "public" and any(
         r.partition(":")[0] in ("proxy", "dns") for r in raw_node.get("roles", []))
+
+def required(aws: dict) -> tuple[str, ...]:
+    """With vpc_id, existing_network has filled in the CIDRs; a private
+    cluster there has no public subnet."""
+    if "vpc_id" in aws and aws.get("ingress", "public") == "private":
+        return tuple(k for k in REQUIRED if k != "public_subnet_cidr")
+    return REQUIRED
+
+def _describe(region: str, *args: str) -> dict:
+    res = run(["aws", "ec2", *args, "--region", region, "--output", "json"], capture=True)
+    return json.loads(res.stdout)
+
+def existing_network(aws: dict, describe=None) -> None:
+    """[aws] vpc_id: check the existing VPC and subnets the cluster goes
+    into, and put their CIDRs in `aws` (vpc_cidr, private_subnet_cidr,
+    public_subnet_cidr), so validation and rendering work on them as on a VPC
+    terraform makes. Called before validation; network_errors checks the
+    routes, DNS and S3 endpoint."""
+    errs = []
+    errs += [f"[aws].{k} comes from vpc_id's VPC and subnets: remove it" for k in NETWORK_CIDRS
+             if k in aws]
+    errs += [f"[aws].{k} must be a quoted id string" for k in EXISTING_VPC_KEYS
+             if k in aws and not (isinstance(aws[k], str) and aws[k])]
+    errs += [f"[aws].vpc_id needs {k}" for k in ("region", "availability_zone") if k not in aws]
+    public = aws.get("ingress", "public") == "public"
+    if "private_subnet_id" not in aws:
+        errs.append("[aws].vpc_id needs private_subnet_id")
+    if public and "public_subnet_id" not in aws:
+        errs.append('[aws].vpc_id needs public_subnet_id with ingress = "public" (proxy and '
+                    "dns nodes get Elastic IPs there)")
+    elif not public and "public_subnet_id" in aws:
+        errs.append('[aws].public_subnet_id is only for ingress = "public": with private '
+                    "ingress every node is in private_subnet_id")
+    vpc_access = aws.get("bucket_access", "anywhere") == "vpc"
+    if vpc_access and "s3_endpoint_id" not in aws:
+        errs.append('[aws].bucket_access = "vpc" with vpc_id needs s3_endpoint_id: the VPC\'s '
+                    "own S3 gateway endpoint (apply doesn't add a second one to its route tables)")
+    elif not vpc_access and "s3_endpoint_id" in aws:
+        errs.append('[aws].s3_endpoint_id is only for bucket_access = "vpc"')
+    if errs:
+        raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
+
+    describe = describe or _describe
+    vpc_id = aws["vpc_id"]
+    vpc = _lookup(describe, aws, "vpc_id", "describe-vpcs", "--vpc-ids", "Vpcs")
+    subnet_ids = {"private": aws["private_subnet_id"]}
+    if public:
+        subnet_ids["public"] = aws["public_subnet_id"]
+    aws["vpc_cidr"] = vpc["CidrBlock"]
+    primary = ipaddress.ip_network(vpc["CidrBlock"])
+    secondary = [ipaddress.ip_network(a["CidrBlock"]) for a in vpc.get("CidrBlockAssociationSet", [])
+                 if a.get("CidrBlockState", {}).get("State") == "associated"
+                 and a["CidrBlock"] != vpc["CidrBlock"]]
+    for label, sid in subnet_ids.items():
+        sub = _lookup(describe, aws, f"{label}_subnet_id", "describe-subnets", "--subnet-ids",
+                      "Subnets")
+        if sub["VpcId"] != vpc_id:
+            errs.append(f"[aws].{label}_subnet_id {sid} is in {sub['VpcId']}, not vpc_id {vpc_id}")
+        if sub["AvailabilityZone"] != aws["availability_zone"]:
+            errs.append(f"[aws].{label}_subnet_id {sid} is in {sub['AvailabilityZone']}, not "
+                        f"availability_zone {aws['availability_zone']} (where the data disks go)")
+        aws[f"{label}_subnet_cidr"] = sub["CidrBlock"]
+        cidr = ipaddress.ip_network(sub["CidrBlock"])
+        if not cidr.subnet_of(primary):
+            errs += [f"[aws].{label}_subnet_id {sid} ({cidr}) is in the VPC's secondary CIDR "
+                     f"{sec}, not its primary {primary}: only subnets in the primary CIDR are "
+                     "supported" for sec in secondary if cidr.subnet_of(sec)]
+    if public and not errs:
+        pub, priv = (ipaddress.ip_network(aws[f"{k}_subnet_cidr"]) for k in ("public", "private"))
+        if aws["public_subnet_id"] == aws["private_subnet_id"] or pub.overlaps(priv):
+            errs.append("[aws].public_subnet_id and private_subnet_id must be two different "
+                        "subnets (their CIDRs overlap)")
+    if errs:
+        raise InstallError("cluster.toml invalid:\n  " + "\n  ".join(errs))
+    log(f"[aws] vpc_id {vpc_id}: VPC {aws['vpc_cidr']} (resolver "
+        f"{ipaddress.ip_network(aws['vpc_cidr']).network_address + 2}), "
+        + ", ".join(f"{label} subnet {aws[f'{label}_subnet_cidr']}" for label in subnet_ids))
+
+def _lookup(describe, aws: dict, key: str, op: str, flag: str, field: str) -> dict:
+    """The one VPC, subnet or endpoint [aws].<key> names. A missing id, or one
+    this AWS login may not describe, stops here with the setting named."""
+    ident = aws[key]
+    try:
+        found = describe(aws["region"], op, flag, ident)[field]
+    except InstallError as e:
+        why = str(e).strip().splitlines()[-1]
+        raise InstallError(f"[aws].{key} {ident}: AWS can't find it in {aws['region']}, or "
+                           f"this login may not describe it ({why})") from None
+    if not found:
+        raise InstallError(f"[aws].{key} {ident}: not found in {aws['region']}")
+    return found[0]
+
+def check_network_switch(cfg, mode: str | None, ids: dict | None = None) -> None:
+    """Refuse to move a cluster that exists between a VPC terraform made and
+    an existing one (vpc_id), or to another existing VPC or subnet: terraform
+    would destroy the network its nodes are in, or replace every node. `mode`
+    and `ids` are tf.state_network's and tf.state_network_ids'."""
+    if mode == "created" and "vpc_id" in cfg.cloud:
+        raise InstallError(
+            "this cluster runs in the VPC apply made, and cluster.toml now sets [aws] vpc_id. "
+            "Moving it would destroy that VPC under its nodes: remove vpc_id (and put the "
+            "CIDRs back), or install the existing-VPC cluster as a new one (another cluster "
+            "name or state bucket)")
+    if mode == "existing" and "vpc_id" not in cfg.cloud:
+        raise InstallError(
+            "this cluster runs in an existing VPC ([aws] vpc_id), and cluster.toml no longer "
+            "sets it. Making a VPC would replace every node: put vpc_id and the subnet ids "
+            "back, or install the new-VPC cluster as a new one (another cluster name or "
+            "state bucket)")
+    # A subnet only one side has is an ingress switch, not a swap.
+    swapped = [f"[aws].{k} {cfg.cloud[k]} (the cluster is in {was})"
+               for k, was in (ids or {}).items() if cfg.cloud.get(k) not in (None, was)]
+    if mode == "existing" and swapped:
+        raise InstallError(
+            "this cluster runs in another existing VPC or subnet than cluster.toml names: "
+            + "; ".join(swapped) + ". Moving it would replace every node and security group "
+            "(instance-store workers lose their data): put the ids back, or install it as a "
+            "new cluster (another cluster name or state bucket)")
+
+def network_errors(aws: dict, describe=None) -> list[str]:
+    """[aws] vpc_id, after existing_network: what the nodes need from the
+    existing network (a default route, the internet gateway for public
+    ingress, VPC DNS, the S3 endpoint). Only validate and apply check this,
+    so destroy and state still work on a network that changed under them."""
+    describe = describe or _describe
+    region, vpc_id = aws["region"], aws["vpc_id"]
+    tables = _read(describe, region, f"{vpc_id}'s route tables", "describe-route-tables",
+                   "--filters", f"Name=vpc-id,Values={vpc_id}")["RouteTables"]
+    main = next((t for t in tables if any(a.get("Main") for a in t.get("Associations", []))), None)
+    subnet_tables = {}
+    for label in ("private", "public"):
+        if sid := aws.get(f"{label}_subnet_id"):
+            subnet_tables[sid] = next((t for t in tables if any(
+                a.get("SubnetId") == sid for a in t.get("Associations", []))), main)
+    errs = []
+    for label, need_igw in (("private", False), ("public", True)):
+        sid = aws.get(f"{label}_subnet_id")
+        if sid is None:
+            continue
+        table = subnet_tables[sid]
+        rtb = table["RouteTableId"] if table else "(none)"
+        targets = [_target(r) for r in (table or {}).get("Routes", [])
+                   if r.get("DestinationCidrBlock") == "0.0.0.0/0" and r.get("State") != "blackhole"]
+        if not targets:
+            need = ("needs a 0.0.0.0/0 route to an internet gateway (igw-…) so the proxy and dns "
+                    "nodes' Elastic IPs can be reached" if need_igw else
+                    "has no 0.0.0.0/0 route, so the nodes there can't download the release "
+                    "(add one to a NAT gateway)")
+            errs.append(f"[aws].{label}_subnet_id {sid}: its route table {rtb} {need}")
+        elif need_igw and not any(t.startswith("igw-") for t in targets):
+            errs.append(f"[aws].public_subnet_id {sid}: its route table {rtb} sends 0.0.0.0/0 to "
+                        f"{', '.join(targets)}, not an internet gateway (igw-…), so the proxy "
+                        "and dns nodes' Elastic IPs can't be reached")
+    dns = _read(describe, region, f"{vpc_id}'s DNS support", "describe-vpc-attribute",
+                "--vpc-id", vpc_id, "--attribute", "enableDnsSupport")
+    if not dns.get("EnableDnsSupport", {}).get("Value"):
+        errs.append(f"[aws].vpc_id {vpc_id} has DNS support (enableDnsSupport) off: the nodes "
+                    "use the VPC's resolver")
+    if aws.get("bucket_access") == "vpc":
+        errs += _endpoint_errors(aws, subnet_tables, describe)
+    return errs
+
+def _read(describe, region: str, what: str, *args: str) -> dict:
+    try:
+        return describe(region, *args)
+    except InstallError as e:
+        why = str(e).strip().splitlines()[-1]
+        raise InstallError(f"can't read {what} (aws ec2 {args[0]}): {why}") from None
+
+ROUTE_TARGETS = ("GatewayId", "NatGatewayId", "TransitGatewayId", "NetworkInterfaceId",
+                 "InstanceId", "VpcPeeringConnectionId", "CarrierGatewayId", "LocalGatewayId")
+
+def _target(route: dict) -> str:
+    return next((route[k] for k in ROUTE_TARGETS if route.get(k)), "?")
+
+def _endpoint_errors(aws: dict, subnet_tables: dict, describe) -> list[str]:
+    """The S3 gateway endpoint the buckets' policy names must be available
+    and on every cluster subnet's route table; otherwise the nodes' own
+    requests are denied."""
+    region, eid = aws["region"], aws["s3_endpoint_id"]
+    ep = _lookup(describe, aws, "s3_endpoint_id", "describe-vpc-endpoints", "--vpc-endpoint-ids",
+                 "VpcEndpoints")
+    if (ep["VpcId"] != aws["vpc_id"] or ep["VpcEndpointType"] != "Gateway"
+            or ep["ServiceName"] != f"com.amazonaws.{region}.s3"):
+        return [f"[aws].s3_endpoint_id {eid} must be an S3 gateway endpoint "
+                f"(com.amazonaws.{region}.s3) in {aws['vpc_id']}"]
+    if str(ep.get("State", "")).lower() != "available":
+        return [f"[aws].s3_endpoint_id {eid} is {ep.get('State')}, not available"]
+    errs = []
+    for sid, table in subnet_tables.items():
+        rtb = table["RouteTableId"] if table else None
+        if rtb not in ep.get("RouteTableIds", []):
+            errs.append(f"[aws].s3_endpoint_id {eid} is not on {sid}'s route table {rtb}, "
+                        "so the nodes there couldn't reach the buckets")
+    return errs
 
 def ingress_cidrs(aws: dict) -> list[str]:
     """Source CIDRs for the proxy security group (dns 53 stays open to all).
@@ -96,6 +296,9 @@ def storage_express(doc: dict) -> bool:
 def validate(doc: dict, errs: list[str]) -> None:
     aws = doc["aws"]
     ingress = _validate_ingress(doc, errs)
+    if "vpc_id" not in aws:
+        errs += [f"[aws].{k} is for an existing VPC: it needs vpc_id"
+                 for k in EXISTING_VPC_KEYS[1:] if k in aws]
     access = aws.get("bucket_access", "anywhere")
     if access not in BUCKET_ACCESS:
         errs.append(f"[aws].bucket_access must be one of {', '.join(BUCKET_ACCESS)}, got {access!r}")
@@ -122,15 +325,16 @@ def validate(doc: dict, errs: list[str]) -> None:
                     "max 63)")
     try:
         vpc = ipaddress.ip_network(aws["vpc_cidr"])
-        pub = ipaddress.ip_network(aws["public_subnet_cidr"])
+        # None: private ingress in an existing VPC, where no node is public.
+        pub = ipaddress.ip_network(aws["public_subnet_cidr"]) if "public_subnet_cidr" in aws else None
         priv = ipaddress.ip_network(aws["private_subnet_cidr"])
     except ValueError as e:
         errs.append(f"[aws] subnet: {e}")
         return
     for label, sub in (("public_subnet_cidr", pub), ("private_subnet_cidr", priv)):
-        if sub.version != vpc.version or not sub.subnet_of(vpc):
+        if sub and (sub.version != vpc.version or not sub.subnet_of(vpc)):
             errs.append(f"[aws].{label} {sub} is outside vpc_cidr {vpc}")
-    if pub.version == priv.version and pub.overlaps(priv):
+    if pub and pub.version == priv.version and pub.overlaps(priv):
         errs.append("[aws] public_subnet_cidr and private_subnet_cidr overlap")
     for n in doc.get("nodes") or []:
         if "internal_ip" not in n:
@@ -149,14 +353,18 @@ def validate(doc: dict, errs: list[str]) -> None:
             errs.append(f"{nm}: internal_ip {addr} is AWS-reserved (first four and last "
                         f"address of {sub})")
 
+def _network_tfvars(aws: dict) -> dict:
+    """The VPC terraform makes, or with vpc_id the existing one's ids."""
+    if "vpc_id" in aws:
+        return {k: aws.get(k) for k in EXISTING_VPC_KEYS}
+    return {k: aws[k] for k in NETWORK_CIDRS}
+
 def tfvars(cfg, state, nodes: list[dict]) -> dict:
     return {
         "region": cfg.cloud["region"],
         "availability_zone": cfg.cloud["availability_zone"],
         "cluster_name": cfg.name,
-        "vpc_cidr": cfg.vpc_cidr,
-        "public_subnet_cidr": cfg.cloud["public_subnet_cidr"],
-        "private_subnet_cidr": cfg.cloud["private_subnet_cidr"],
+        **_network_tfvars(cfg.cloud),
         "ami": cfg.cloud.get("ami") or _resolve_ami(cfg),
         "deploy_ssh_pubkey": state.deploy_pubkey(),
         "enable_backups": cfg.cloud.get("auto_backups", True),

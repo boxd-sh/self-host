@@ -1,0 +1,232 @@
+# boxd self-host on AWS with Windows machines — cluster.toml
+#
+# examples/aws/cluster.toml with Windows Server machines next to the Linux
+# ones (docs/REFERENCE.md "Windows machines"). Copy this file to cluster.toml
+# at the root of the installer and work through it top to bottom:
+#
+#   1. YOUR CLUSTER   — values you must change (marked CHANGE)
+#   2. WINDOWS        — your image, its registry, licensing, how copies are made
+#   3. NODES          — the machines, sized for Windows guests
+#   4. LEAVE AS IS    — service settings; only change these if boxd asks you to
+#
+# Before the first apply:
+#
+#   - a license key that includes Windows guests (windows-guests): ask your
+#     boxd contact; `validate` and `apply` check it first;
+#   - your Windows image, built from your own Windows media and pushed to a
+#     registry the workers can pull from (win-img/README.md, about 15 minutes
+#     on a Linux host with KVM);
+#   - the registry's pull credentials in the providers config:
+#       ./boxd-install providers edit
+#       [windows_registry]
+#       host     = "ghcr.io"
+#       username = "your-bot-account"
+#       password = "<a token that can read the image>"
+#     Use credentials that don't expire: workers pull the image at their first
+#     Windows machine, which can be weeks after an apply. Amazon ECR's tokens
+#     last 12 hours, so ECR doesn't fit yet; GitHub Container Registry (a
+#     token with read:packages), Docker Hub (an access token), Google Artifact
+#     Registry (a service account key) or your own Harbor (a robot account) do.
+#
+# Then check it, before anything touches AWS:
+#
+#   ./boxd-install validate
+#
+# Secrets never go in this file (OAuth clients, API keys): see
+# README "Install on AWS" step 6 (`./boxd-install providers edit`).
+#
+# This example is one combined control node + one worker, on EC2 in two
+# subnets of one availability zone: the proxy/dns node in the public subnet
+# (Elastic IP), everything else in the private one (egress via a NAT gateway).
+# AWS reserves the first four and the last address of each subnet, so don't
+# use those as internal_ip.
+
+# ============================================================ 1. YOUR CLUSTER
+
+[cluster]
+# CHANGE. Lowercase letters, digits and dashes. Prefixes every AWS resource.
+name = "boxd-aws-win"
+# CHANGE. The DNS zone the cluster serves, e.g. boxd.yourcompany.com. You
+# delegate it from its parent zone (NS + glue records) after the first apply.
+zone = "boxd.example.com"
+# The boxd release to install. "latest" follows the newest release boxd
+# publishes (resolved on every apply). To stay on one
+# release, put the 40-character version id the installer prints here.
+assets_version = "latest"
+# Optional. The name of the cluster's organization, the one everyone who
+# signs in joins. It's given when the first person signs in; rename it on
+# the console's Org page after that. Without it: "<First name>'s default org".
+# org_name = "Your Company"
+
+[aws]
+region              = "us-east-1"        # CHANGE if needed
+availability_zone   = "us-east-1a"       # CHANGE if needed
+# The VPC the installer creates. Pick a range that doesn't overlap networks
+# you'll peer with; both subnets must sit inside it.
+vpc_cidr            = "10.70.0.0/16"
+public_subnet_cidr  = "10.70.0.0/24"
+private_subnet_cidr = "10.70.1.0/24"
+# CHANGE. Holds the terraform state and the encrypted installer state.
+# Create it once before the first apply: versioning on, SSE-C allowed
+# (README "Install on AWS" step 4). S3 names are global: add your account id.
+state_bucket = "boxd-aws-win-state-123456789012"
+
+[acme]
+# CHANGE. Where the certificate authority (ZeroSSL) sends expiry notices.
+contact_email = "ops@example.com"
+
+[license]
+# CHANGE. The file with your boxd license key, next to this one (it is
+# git-ignored). Windows machines need a key that includes windows-guests.
+# apply installs the key on every run. README "License key".
+key_file = "license.key"
+
+[telemetry]
+# The cluster sends boxd one usage report an hour: counts only, no personal
+# data. See it with `boxd-ctl telemetry show`. Only a license key with
+# telemetry opt-out can turn it off (false, with [license] key_file); the free
+# tier always sends. Unset, apply leaves the cluster's setting as it is.
+# README "Telemetry".
+# enabled = false
+
+# ================================================================== 2. WINDOWS
+
+[windows]
+# CHANGE. The image you built and pushed (win-img/README.md), with a tag or a
+# digest: every new Windows machine boots it.
+image = "ghcr.io/yourcompany/boxd-windows-server-2025:2026-11"
+# Optional. Your KMS host (host or host:port) for volume-licensing media: every
+# Windows machine activates against it at boot. An evaluation image can't
+# activate; it runs 180 days.
+# kms = "kms.yourcompany.internal:1688"
+# How you license Windows with Microsoft. "per-vm" (default): Windows machines
+# go to any worker. "per-host": only to the workers in `hosts`, the ones you
+# licensed (Windows Server Datacenter per host).
+licensing = "per-vm"
+# licensing = "per-host"
+# hosts = ["boxd-aws-win-worker-0"]
+# How a snapshot or fork of a Windows machine is taken:
+# - "generalize" (default): the disk alone, run through sysprep. Each copy gets
+#   its own SID and computer name and boots through Windows Setup: about 35 s
+#   from a snapshot, 70-80 s for a fork. Use it with Active Directory.
+# - "fast": memory, devices and disk, never sysprepped. A copy resumes where
+#   its source was in seconds and only its network address changes. It keeps
+#   its source's SID, computer name, KMS client ID and every agent's host ID,
+#   and everything that was in its memory: not for domain members. Only a
+#   running or hibernated machine's copy is fast; others are generalized.
+copies = "generalize"
+# copies = "fast"
+#
+# apply also opens TCP 61000-65000 on the proxy, one RDP port per Windows
+# machine, from [aws] ingress_cidrs (default: anywhere). To keep RDP to your
+# own networks, set ingress_cidrs under [aws]; it covers the other proxy ports
+# too (README "Private ingress on AWS").
+
+# ==================================================================== 3. NODES
+#
+# Roles: control (keeps cluster state; use 1 or 3), worker (runs the VMs),
+# proxy (public SSH/HTTPS entry), console (web UI), metrics (usage graphs),
+# dns:ns1 (authoritative DNS for your zone). Roles can share a node.
+#
+# CHANGE the node names: they become your instance names, so start them with
+# your cluster name (<name>-control-0, <name>-worker-0). `validate` warns if
+# they don't. Never rename a node after the first apply: that replaces it.
+#
+# One nameserver (dns:ns1) is the small setup. For redundancy give a second
+# node "dns:ns2"; apply then prints glue records for both.
+#
+# Workers need nested virtualization: C/M/R 7i or 8i instance families, or
+# any *.metal type. The installer turns it on for non-metal workers.
+
+[[nodes]]
+name        = "boxd-aws-win-control-0"
+roles       = ["control", "proxy", "console", "metrics", "dns:ns1"]
+internal_ip = "10.70.0.10"               # in public_subnet_cidr (it has the proxy)
+
+# Windows machines run on the workers' KVM like the Linux ones: the same
+# instance families. A Windows machine is 2 vCPU / 8 GiB unless a user picks
+# another size, so a worker's memory is what bounds how many run on it.
+# Disk: a worker exports the image's disk once (about 9 GB allocated for a 7 GB
+# image), each Windows machine's disk then grows from it (32 GB at most for
+# that image), and with copies = "fast" a snapshot also holds the machine's
+# memory. The pulled image stays in Docker on the boot disk (about 34 GB;
+# boot_disk_gb defaults to 200).
+#
+# A worker's first Windows machine takes about 12 minutes (the pull and the
+# disk export); later ones on that worker about a minute.
+
+[[nodes]]
+name         = "boxd-aws-win-worker-0"
+roles        = ["worker"]
+internal_ip  = "10.70.1.10"              # in private_subnet_cidr
+machine_type = "m8i.8xlarge"             # 32 vCPU, 128 GiB: about 14 Windows machines of 2 x 8
+data_disk_gb = 1000                      # required on workers: VM disks live here
+
+# A second worker for more machines, or for licensing = "per-host" with only
+# some workers licensed for Windows:
+# [[nodes]]
+# name         = "boxd-aws-win-worker-1"
+# roles        = ["worker"]
+# internal_ip  = "10.70.1.11"
+# machine_type = "m8i.8xlarge"
+# data_disk_gb = 1000
+
+# Private ingress, your own CA, bucket storage, machine sizes and single
+# sign-on are as in examples/aws/cluster.toml (its "3. OPTIONAL").
+
+# ============================================================== 4. LEAVE AS IS
+
+[network]
+vni_range_start    = 100
+vni_range_end      = 10000
+bridge_subnet_base = "10.100.0.0"
+# Routed networking instead (live migration): docs/REFERENCE.md, "Network modes".
+
+[control]
+socket_path = "/run/boxd/control.sock"
+default_auto_suspend_secs = 900          # idle VMs suspend after 15 min
+default_auto_hibernate_secs = 1800
+
+[worker]
+warm_slots = 2
+# true lets the VMs your users run start VMs of their own (KVM inside a boxd
+# VM). That is separate from the nested virtualization the installer turns on
+# for the worker instance itself, which is always on. Leave it off unless
+# users need it: it only performs well on *.metal workers, and it widens the
+# KVM attack surface for every VM on the host.
+nested_virt = false
+# TC filters on each VM's network interface. "full" (the default) compiles
+# per-VM eBPF programs with LLVM, which keeps VMs of different orgs apart on
+# the network but is slow on some CPUs. "anti-spoof" skips LLVM: VMs still
+# can't fake their MAC or IP, and only boxd itself can reach the in-VM agent
+# port (57073), but VMs reach each other on every other port, across orgs.
+# Use it only on single-tenant installs. A [[nodes]] entry can set it per
+# worker. Needs boxd assets that include it; older ones ignore the key.
+# tc_filters = "full"
+# Kernel same-page merging on every worker: guests booted from the same
+# template share many identical pages, so a running machine costs the host
+# less memory than it touched. Costs some CPU (ksmd). See OPERATIONS.md,
+# "Capacity and machine sizes". Set by the installer, not passed to boxd.
+# ksm = true
+# Swap files on each worker's data disk, in GB, one file per entry (default
+# [64]). Swap is where idle guest pages park on an oversubscribed worker.
+# Grow it by appending (e.g. [64, 256]): an active swap file can't be resized.
+# swap_gb = [64]
+
+[proxy]
+ssh_port = 2222
+http_port = 80
+https_port = 443
+api_port = 9443
+host_key = "/etc/boxd/tls/proxy_host_ed25519"
+
+[dns]
+listen = "0.0.0.0:53"
+alias_zones = []
+
+[names]
+reserved = [
+    "api", "app", "www", "mail", "git", "ssh", "proxy", "ns1", "ns2",
+    "console", "connect", "docs", "help", "support", "status", "admin",
+    "grafana",
+]

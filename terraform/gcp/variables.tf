@@ -65,3 +65,10 @@ variable "machine_sizes" {
   }))
   default = []
 }
+
+# [windows] in cluster.toml: the proxies take each Windows machine's RDP port
+# (TCP 61000-65000).
+variable "windows_rdp" {
+  type    = bool
+  default = false
+}

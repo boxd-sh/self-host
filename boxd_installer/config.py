@@ -7,7 +7,7 @@ import ssl
 import tomllib
 import urllib.parse
 
-from . import clouds, private_services
+from . import clouds, private_services, windows
 from .util import InstallError
 
 KNOWN_ROLES = {"control", "worker", "proxy", "console", "dns", "metrics"}
@@ -16,7 +16,7 @@ SERVICE_TABLES = {
     "github", "google", "oidc", "resend", "analytics", "backups",
     "automations", "templates", "snapshot_archive", "storage_engine",
 }
-INSTALLER_TABLES = ({"cluster", "network", "nodes", "license", "telemetry", "images"}
+INSTALLER_TABLES = ({"cluster", "network", "nodes", "license", "telemetry", "images", "windows"}
                     | set(clouds.CLOUDS) | set(clouds.TARGETS))
 ACME_CAS = ("gts", "zerossl", "local")
 PRIVATE_NET = ipaddress.ip_network("10.0.0.0/8")
@@ -112,7 +112,8 @@ class Node:
         return self.roles[0]
 
 PROVIDER_TABLES = {"google", "github", "oidc", "resend", "analytics",
-                   "backups", "automations", "snapshot_archive", "storage_engine"}
+                   "backups", "automations", "snapshot_archive", "storage_engine",
+                   windows.PROVIDER}
 # [oidc] (boxd `OidcConfig`): single sign-on through the company's OpenID
 # Connect provider. Everything but the secret goes in cluster.toml; the
 # secret goes in the providers config, which validate never reads.
@@ -260,6 +261,11 @@ class Config:
         # "private": proxy/dns get no public IP and advertise their internal
         # ones (AWS only; clients come in over Twingate or similar).
         self.ingress: str = self.cloud.get("ingress", "public")
+        # Where the nodes are (vrack, ClickHouse): an existing VPC's private
+        # subnet when every node is in it, else the whole VPC.
+        self.node_cidr: str = (self.cloud["private_subnet_cidr"]
+                               if "vpc_id" in self.cloud and self.ingress == "private"
+                               else self.vpc_cidr)
 
     def _init_gke(self, doc: dict) -> None:
         """[gke]: one synthetic node per pod (clouds/gke.py topology_nodes), so
@@ -269,6 +275,7 @@ class Config:
         from .clouds import gke
         g = doc["gke"]
         self.vpc_cidr = g.get("vpc_cidr")
+        self.node_cidr = self.vpc_cidr
         # Routed only; the VNI range is unused there but every config carries it.
         self.network = {"vni_range_start": 100, "vni_range_end": 10000, "mode": "routed",
                         **doc.get("network", {})}
@@ -324,6 +331,7 @@ def validate_providers(doc: dict) -> None:
             errs.append(f"[automations].{k} is derived by the installer — remove it")
     if isinstance(doc.get("storage_engine"), dict):
         errs += validate_storage_store(doc["storage_engine"])
+    errs += windows.provider_errors(doc)
     if errs:
         raise InstallError("providers config invalid:\n  " + "\n  ".join(errs))
 
@@ -402,6 +410,9 @@ def _cloud_name(doc: dict) -> str:
 def load(path: str) -> Config:
     with open(path, "rb") as fh:
         doc = tomllib.load(fh)
+    # An existing VPC's CIDRs come from AWS, before anything checks them.
+    if isinstance(doc.get("aws"), dict) and "vpc_id" in doc["aws"]:
+        clouds.CLOUDS["aws"].existing_network(doc["aws"])
     _validate(doc)
     return Config(doc, os.path.dirname(os.path.abspath(path)))
 
@@ -432,7 +443,7 @@ def _validate(doc: dict) -> None:
 
     routed = doc.get("network", {}).get("mode") == "routed"
     for tbl, keys in (("cluster", ("name", "zone", "assets_version")),
-                      (cloud, tmod.CLOUD_REQUIRED if tmod else mod.REQUIRED),
+                      (cloud, tmod.CLOUD_REQUIRED if tmod else mod.required(doc[cloud])),
                       ("network", ("pool",) if tmod else ("vni_range_start", "vni_range_end")
                        + (("pool",) if routed else ("bridge_subnet_base",)))):
         missing = [k for k in keys if k not in doc.get(tbl, {})]
@@ -458,6 +469,7 @@ def _validate(doc: dict) -> None:
         _validate_nodes_and_network(doc, cloud, mod, errs)
     _validate_worker_and_services(doc, cloud, mod, errs)
     private_services.validate(doc, errs, target)
+    windows.validate(doc, errs, target)
     if not tmod:
         mod.validate(doc, errs)
     _validate_templates(doc, errs)

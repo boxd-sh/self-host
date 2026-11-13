@@ -103,6 +103,7 @@ FEATURE_NAMES = {
     2: "telemetry-opt-out",
     3: "bucket-storage",
     4: "usage-billing",
+    5: "windows-guests",
 }
 USAGE_BILLING = "usage-billing"
 

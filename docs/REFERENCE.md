@@ -355,6 +355,83 @@ A worker that already exists keeps the type it has, with or without a key:
 the license never resizes a running worker (boxd never stops a machine
 because of the license). Set `machine_type` to change it.
 
+### Windows machines
+
+With a license key that has Windows guests, users create Windows Server machines next to
+Linux ones (`boxd machine new --os windows`). They reach them over RDP (each machine has
+its own RDP port on the proxy; `boxd machine rdp reset-password` makes a password and shows
+it once) and over `boxd machine connect` (a PowerShell session). Windows machines
+hibernate and wake like Linux machines. Their snapshots, forks and checkpoints hold the disk
+alone; a snapshot or fork is generalized, so every copy gets its own identity.
+
+You build the cluster's Windows image yourself, from your own Windows media, and push it to
+your registry: [win-img/README.md](../win-img/README.md) (where to get an ISO, what goes in
+the image, the build). Then name it here (a whole AWS cluster with Windows machines:
+[examples/aws-windows/cluster.toml](../examples/aws-windows/cluster.toml)):
+
+```toml
+[windows]
+# The image you built and pushed (win-img/README.md).
+image = "registry.example.com/boxd/windows-server-2025:2026-11"
+# Optional. Your KMS host, host or host:port. Every Windows machine activates against it at
+# boot (volume-licensing and SPLA images; an evaluation image can't).
+# kms = "kms.example.com:1688"
+# Optional. How you license Windows with Microsoft: "per-vm" (default: Windows machines go
+# to any worker) or "per-host" (only to the workers in `hosts`, the ones you licensed).
+# licensing = "per-vm"
+# hosts = ["boxd-worker-1", "boxd-worker-2"]   # names from [[nodes]]
+# Optional. How a snapshot or a fork of a Windows machine is taken:
+# - "generalize" (default): the disk alone, generalized with sysprep. Every copy gets its own
+#   SID and computer name, and boots through Windows Setup: about 35 s from a snapshot, 70-80 s
+#   for a fork.
+# - "fast": memory, devices and disk, never generalized. A copy resumes where its source was
+#   and only its network address changes, in seconds. It keeps its source's SID, computer
+#   name and KMS client ID: not for Active Directory members, and a KMS host counts the copies
+#   as one client. Only a running or hibernated machine's copy is fast, and only once the
+#   machine has booted with a release and an image built from it that have the copy's identity
+#   channel; any other copy (a suspended or stopped machine's) is generalized.
+# copies = "generalize"
+```
+
+`image` needs a tag or a digest. `[windows]` needs `[license] key_file` with a key that
+includes Windows guests; `validate` and `apply` check the key before anything else.
+`[windows]` is not supported on `[gke]` yet.
+
+The registry's pull credentials are a secret: `./boxd-install providers edit` stores them
+(`[windows_registry]`, [Providers](#providers-secrets)), never `cluster.toml`
+(`[worker] registries` there is refused). `apply` warns when the image's registry has no
+credentials. Every `apply` then:
+
+- installs on each worker what Windows machines need from the release bundle: the UEFI
+  firmware they boot, at `/mnt/boxd-data/uefi.fd`, and the Windows builds of the in-VM
+  `boxd` and `run` CLIs when the release has them, in `/mnt/boxd-data/sdk/`. A worker reads
+  them when it starts, so `apply` restarts the workers whose files changed. A release
+  without the firmware is refused;
+- writes the registry's credentials into each worker's config (`[[worker.registries]]`);
+- opens TCP 61000–65000 on the proxies, each Windows machine's RDP port: on AWS from
+  `[aws] ingress_cidrs`, like the other proxy ports; on GCP from anywhere. On bare metal,
+  open them in your own firewall;
+- sets the cluster's Windows image, KMS host and licensing mode (`boxd-ctl image
+  set-windows`, `boxd-ctl cluster-config set windows_kms` and `windows_licensing`), and
+  marks the workers in `hosts` as licensed Windows hosts and every other worker as not
+  (`boxd-ctl node windows-host`), before it switches the licensing mode;
+- writes `copies` into every worker's config (`[windows] copies`) and restarts the workers
+  whose config changed. It decides how new copies are taken: a snapshot taken before a change
+  restores as what it is.
+
+Without `[windows]` nothing changes, and a Windows create is refused with a sentence that
+names what's missing. Removing `[windows]` later undoes nothing: the image, the settings
+and the files on the workers stay, so Windows machines that exist keep working. To stop new
+Windows machines, `boxd-ctl image unset-windows` (OPERATIONS.md).
+
+**Workers.** A Windows machine boots UEFI firmware on the worker's KVM, like any machine. A
+worker pulls the image at its first Windows machine, then copies its disk out: about 12
+minutes for a 7 GB image with a 32 GB disk, inside the 15 minutes boxd gives a create.
+Later creates on that worker take about a minute. A fresh machine reboots once inside
+Windows Setup before it's ready. The pulled image stays in Docker on the worker's boot disk
+(about 34 GB for that image; workers get 200 GB unless `boot_disk_gb` says otherwise), and
+its disk on the data disk (about 9 GB allocated).
+
 ### Telemetry
 
 Every boxd cluster sends boxd usage reports over HTTPS, from the control
@@ -510,6 +587,10 @@ hides sign-in buttons and features for anything unconfigured. Values are TOML
 - `[snapshot_archive]`: only to use your own bucket for the
   [snapshot archive](#snapshot-archive) (`endpoint`, `bucket`, `region`,
   `access_key`, `secret_key`).
+- `[windows_registry]`: `host`, `username`, `password`, the pull credentials
+  of the private registry your Windows image is in
+  ([Windows machines](#windows-machines)). Every worker gets them, and
+  `./boxd-install windows-image build` pushes the image with them.
 
 Who may sign up once sign-in works is in
 [OPERATIONS.md](../OPERATIONS.md#people-and-orgs) (`boxd-ctl signups`).
@@ -868,7 +949,8 @@ directory once it's stored. `.gitignore` keeps `*.pem`, `*.key` and
 custom domains and org domains. Point it at your internal resolver so it
 sees your internal zones; left unset it asks `8.8.8.8`, which can't. On AWS
 that's the VPC's resolver: `vpc_cidr`'s base address + 2 (`10.70.0.2` for
-`10.70.0.0/16`).
+`10.70.0.0/16`), or [an existing VPC's](INSTALL.md#into-an-existing-vpc)
+CIDR's.
 
 **No corporate CA yet?** For an evaluation only, make a throwaway root and
 an intermediate constrained to your zone, and trust the root on the laptops
@@ -1717,7 +1799,8 @@ Terraform then makes `<cluster>-storage-<account>--<az-id>--x-s3` (the AZ id
 of `availability_zone`, such as `euc1-az2`), an IAM user whose key may only
 open sessions on it (`s3express:CreateSession`), the abort-incomplete-multipart
 lifecycle rule, and an `s3express` gateway endpoint so workers reach it
-through the VPC. Workers' `bucket.toml` gets `s3_express = true`, and boxd
+through the VPC (not [in an existing VPC](INSTALL.md#into-an-existing-vpc),
+whose route tables `apply` leaves alone). Workers' `bucket.toml` gets `s3_express = true`, and boxd
 talks to the zonal endpoint with session credentials. Express is offered in
 some availability zones only: check that yours has it before the first apply.
 
