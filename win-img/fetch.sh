@@ -18,7 +18,8 @@
 #                         on any worker CPU)
 #   gh.zip                the GitHub CLI for Windows amd64 (github.com/cli/cli releases)
 set -eu
-OUT=${OUT:-$(dirname "$0")/files}
+HERE=$(cd "$(dirname "$0")" && pwd)
+OUT=${OUT:-$HERE/files}
 
 GIT_URL=https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/Git-2.56.1-64-bit.exe
 GIT_SHA256=c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559
@@ -53,6 +54,10 @@ fetch() {
   fi
   mv "$1.part" "$1"
 }
+
+# CrowdStrike Falcon (README.md, "Example: CrowdStrike Falcon"): the sensor and your CID, with a
+# Falcon API client in FALCON_CLIENT_ID, FALCON_CLIENT_SECRET and FALCON_CLOUD:
+#   OUT="$PWD" sh "$HERE/examples/crowdstrike/fetch-falcon.sh"
 
 fetch git-installer.exe "$GIT_URL" "$GIT_SHA256"
 fetch claude.exe "$CLAUDE_URL" "$CLAUDE_SHA256"

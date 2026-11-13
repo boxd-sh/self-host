@@ -10,7 +10,7 @@ import subprocess
 
 from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
                oidc, private_services, remote_state, render, storage_engine, telemetry, tf,
-               windows)
+               windows, windows_image)
 from .state import Allocation, State, generate_egress_ca
 from .util import InstallError, log
 
@@ -769,6 +769,28 @@ def cmd_state(args) -> int:
         print(f"state pushed from ./{rel}; local copy deleted")
     return 0
 
+def cmd_windows_image(args) -> int:
+    """`windows-image kit`: the part of `./boxd-install windows-image build` that runs here
+    (windows_image.py). Prints `key=value` lines on stdout for boxd-install, which runs the build
+    on the host."""
+    cfg = config.load(args.cluster)
+    if clouds.kubernetes(cfg):
+        raise InstallError("[windows] is not supported on [gke] yet")
+    with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
+        state = State(args.state_dir)
+        cfg.apply_overlay(state.load_providers())
+        # The license key first, as apply checks it: an image is no use without Windows guests.
+        license.key_path(cfg)
+        if errs := windows.errors(cfg):
+            raise InstallError("; ".join(errs))
+        assets_root = assets.ensure(cfg, args.cache_dir, state)
+        info = windows_image.prepare(cfg, args.cache_dir, assets_root)
+    for k, v in info.items():
+        if k in ("kit", "docker_config") and v:
+            v = os.path.relpath(v, ROOT)
+        print(f"{k}={v}")
+    return 0
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="install.py")
     p.add_argument("--cluster", default=os.path.join(ROOT, "cluster.toml"))
@@ -810,6 +832,9 @@ Changes take effect on the next `apply`.""")
                     help="TOML file (for `set`) / PEM file (for `set-github-key`) / "
                          "CA cert PEM (for `set-tls-ca`)")
     pp.add_argument("key", nargs="?", help="CA private key PEM (for `set-tls-ca`)")
+    pw = sub.add_parser("windows-image",
+                        help="the tools-image part of ./boxd-install windows-image build")
+    pw.add_argument("action", choices=["kit"])
 
     args = p.parse_args()
     # SIGTERM (`docker stop`, a cancelled CI job) unwinds like Ctrl-C: the state push in
@@ -850,7 +875,8 @@ Changes take effect on the next `apply`.""")
     try:
         rc = {"validate": cmd_validate, "render": cmd_render,
               "apply": cmd_apply, "destroy": cmd_destroy, "ctl": cmd_ctl,
-              "state": cmd_state, "providers": cmd_providers}[args.cmd](args)
+              "state": cmd_state, "providers": cmd_providers,
+              "windows-image": cmd_windows_image}[args.cmd](args)
     except InstallError as e:
         print(f"error: {e}", file=sys.stderr)
         rc = 1

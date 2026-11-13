@@ -589,13 +589,8 @@ hides sign-in buttons and features for anything unconfigured. Values are TOML
   `access_key`, `secret_key`).
 - `[windows_registry]`: `host`, `username`, `password`, the pull credentials
   of the private registry your Windows image is in
-  ([Windows machines](#windows-machines)). Every worker gets them.
-- `[crowdstrike]`: `client_id`, `client_secret`, `cloud` (`us-1`, `us-2`,
-  `eu-1` or `us-gov-1`), a CrowdStrike Falcon API client with the scope
-  **Sensor download: Read**. `windows-image build` then downloads the Windows
-  sensor and reads your customer ID (CID) through Falcon's API, and installs the
-  sensor in the image ([win-img/README.md](../win-img/README.md), "CrowdStrike
-  Falcon").
+  ([Windows machines](#windows-machines)). Every worker gets them, and
+  `./boxd-install windows-image build` pushes the image with them.
 
 Who may sign up once sign-in works is in
 [OPERATIONS.md](../OPERATIONS.md#people-and-orgs) (`boxd-ctl signups`).

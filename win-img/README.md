@@ -112,67 +112,83 @@ then, and the software on it carries on as its source, its host IDs included.
 
 ## Example: CrowdStrike Falcon
 
-1. **The sensor and your CID.** With a `[crowdstrike]` provider (a Falcon API client with
-   **Sensor download: Read**, docs/REFERENCE.md "Providers"), `windows-image build` downloads
-   the newest Windows sensor through Falcon's API, checks its SHA-256 against the one Falcon
-   lists, and reads your CID; the build installs it as below and you write nothing. Without
-   the provider, download `FalconSensor_Windows.exe` from your Falcon console (Host setup and
-   management → Sensor downloads) into `files/`, or add a `fetch` line that takes it from
-   your own artifact store, with its SHA-256; CrowdStrike doesn't publish it.
-2. **Install it in the image** with your CID and three options:
-   - `NO_START=1`: the image's sensor never registers; each machine registers at its first
-     boot, as its own host;
-   - `VDI=1`: a fork or a snapshot's copy notices it was cloned and registers as a new host;
-   - `ProvNoWait=1`: the build has no network, and without it the installer waits for
-     CrowdStrike's cloud.
+`examples/crowdstrike/` installs the Falcon sensor in the image:
 
-   Retry it: right after the image build's first logon the installer can fail (exit 28, or
-   1618 while Windows Installer is busy), and the same command a few minutes later succeeds.
-   By hand, in `install.ps1`:
-   ```powershell
-   for ($try = 1; $try -le 10; $try++) {
-       $p = Start-Process -FilePath (Need 'FalconSensor_Windows.exe') -Wait -PassThru -ArgumentList @(
-           '/install', '/quiet', '/norestart', 'CID=<your CID>', 'NO_START=1', 'VDI=1', 'ProvNoWait=1')
-       if ($p.ExitCode -eq 0 -and (Get-Service CSAgent -ErrorAction SilentlyContinue)) { break }
-       Start-Sleep -Seconds 60
-   }
-   if ($p.ExitCode -ne 0) { throw "the Falcon sensor's installer exited $($p.ExitCode)" }
+1. **A Falcon API client** with the scope **Sensor download: Read** (Falcon console: Support and
+   resources → API clients and keys). Only the image build uses it: put it in the build host's
+   environment when you run the build, not in `cluster.toml` or the providers config.
+   ```sh
+   export FALCON_CLIENT_ID=… FALCON_CLIENT_SECRET=… FALCON_CLOUD=eu-1   # us-1, us-2, eu-1, us-gov-1
    ```
-   The CID is in the image, readable by every machine's administrators, as on any host you
-   deploy the sensor to.
-3. **Copies.** A fork or a snapshot's copy starts with its source's agent ID (AID). With
-   `VDI=1` the sensor sorts it out by itself: on boxd, about two minutes after a fork booted,
-   the copy registered as a new host, and its source re-registered once under its own
-   hostname, with no hook and no detection. Without `VDI=1`, copies come up with their source's
-   AID. `on-clone.d/crowdstrike-falcon.ps1.example` is the other way, and a worse one: it clears
-   the copied AID before the copy reaches the network, but only when the hosts' sensor update
-   policy has uninstall and maintenance protection off. With protection on, the sensor refuses
-   and the copy stays off the network. Either way Falcon raises a **High "Defense Evasion via
-   Disable or Modify Tools" detection** for every copy, unless an IOA exclusion covers the hook.
-   With `copies = "fast"` a copy resumes its source's running sensor instead of booting, and
-   keeps its source's AID until the sensor notices otherwise: check the copies in your Falcon
-   console before relying on it.
-4. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the
-   internet by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for
-   your cloud.
+2. **The sensor and your CID.** Add this line to the end of `fetch.sh`:
+   ```sh
+   OUT="$PWD" sh "$HERE/examples/crowdstrike/fetch-falcon.sh"
+   ```
+   It downloads the Windows sensor through Falcon's API, checks its SHA-256 against the one Falcon
+   lists, and reads your customer ID (CID), into `files/`. The newest sensor by default;
+   `FALCON_SENSOR_VERSION=7.20.19011` for another. Your hosts' sensor update policy moves every
+   machine's sensor to its own version anyway, so match it.
+3. **Install it in the image.** Copy `examples/crowdstrike/install-falcon.ps1` next to
+   `install.ps1`, and add this line to the end of `install.ps1`:
+   ```powershell
+   & (Join-Path $PSScriptRoot 'install-falcon.ps1')
+   ```
+   It installs the sensor with your CID and three options: `NO_START=1` (the image's sensor never
+   registers; each machine registers at its first boot, as its own host), `VDI=1` (a fork or a
+   snapshot's copy notices it was cloned and registers as a new host) and `ProvNoWait=1` (the
+   build has no network). It tries up to 10 times: right after the build's first logon the
+   installer can fail (exit 28, or 1618 while Windows Installer is busy). The CID is in the image,
+   readable by every machine's administrators, as on any host you deploy the sensor to.
+4. **Copies.** With `VDI=1` the sensor sorts copies out by itself: on boxd, about two minutes
+   after a fork booted, the copy registered as a new host, and its source re-registered once under
+   its own hostname, with no hook and no detection. `on-clone.d/crowdstrike-falcon.ps1.example` is
+   the other way, and a worse one: it clears the copied agent ID before the copy reaches the
+   network, but only when the hosts' sensor update policy has uninstall and maintenance protection
+   off (with it on, the sensor refuses and the copy stays off the network), and Falcon raises a
+   **High "Defense Evasion via Disable or Modify Tools" detection** for every copy unless an IOA
+   exclusion covers the hook. With `copies = "fast"` a copy resumes its source's running sensor
+   instead of booting, and keeps its source's agent ID until the sensor notices otherwise: check
+   the copies in your Falcon console before relying on it.
+5. **Network.** The sensor talks to CrowdStrike's cloud over HTTPS. Machines reach the internet
+   by default; on a machine with an egress allowlist, allow CrowdStrike's hosts for your cloud.
 
 ## Building and installing the image
 
+Name the image in `cluster.toml` first (`[windows] image`, with a tag you haven't pushed before)
+and put the registry's credentials in the providers config (`[windows_registry]`, docs/REFERENCE.md
+"Windows machines"). Then, on the build host, in the installer's directory:
+
 ```sh
-./win-img/fetch.sh
-./boxd-install windows-image build \
-    --iso ~/iso/windows-server-2025.iso \
-    --registry registry.example.com/boxd/windows-server-2025:2026-11
+./boxd-install windows-image build --iso ~/iso/windows-server-2025.iso
 ```
 
-The command:
-1. builds the image on a host with KVM, with boxd's setup from your installed release, then
-   this directory's `install.ps1` and `on-clone.d/` hooks, then sysprep;
-2. boots it once to check it (the agent answers, the machine reports ready);
-3. pushes it to your registry.
+It takes about 20 minutes:
 
-Then name it in `cluster.toml` and apply (docs/REFERENCE.md "Windows machines"; a whole AWS
-cluster with Windows machines: `examples/aws-windows/cluster.toml`). Your
-workers pull it at their first Windows machine. After a boxd upgrade, build the image
-again: boxd's part of the image comes from the release, and new Windows machines get what
-the release adds to them. Machines made from an older image keep working.
+1. **boxd's half** of the image comes from the release your cluster runs (`[cluster]
+   assets_version`): the installer fetches and checks the release bundle, as `apply` does, and
+   copies its Windows image kit into `cache/windows-image/<release>/`;
+2. **the inputs**: boxd's (the virtio drivers, the terminal support), each checked against a pinned
+   SHA-256, and yours (`fetch.sh` into `files/`). Downloads stay in the cache for the next build;
+3. **the install** of Windows from your ISO under QEMU, with no network: boxd's setup (the agent, the
+   boot script), then your `install.ps1` and `on-clone.d/` hooks, then sysprep, so every machine
+   made from the image gets its own identity. A failed or hung `install.ps1` stops the build after
+   an hour at most, with its log in the message;
+4. **the push** of the image to `[windows] image`, with `[windows_registry]`'s credentials (else
+   the build host's own `docker login`). The built disk is deleted afterwards (`--keep` keeps it).
+
+Then `./boxd-install apply` makes it the cluster's Windows image. Options:
+
+| Option | |
+|---|---|
+| `--iso FILE` | your Windows Server 2025 ISO (above) |
+| `--product-key-file FILE` | a file with the product key Windows Setup needs for volume-licensing media: Microsoft's KMS client setup key for the edition (Windows Server 2025 Datacenter: `D764K-2NDRG-47T6Q-P8T8W-YP6DF`, Standard: `TVRH6-WHNXV-R9WG3-9XRFY-MY832`). The evaluation needs none |
+| `--index N` | the ISO's edition, its image index (default 4, Datacenter with Desktop Experience, on the evaluation and on volume media; 3 Datacenter Core, 2 Standard with Desktop Experience, 1 Standard Core) |
+| `--size SIZE` | the image's disk, default `32G`: every machine's disk grows past it |
+| `--name NAME` | the build's name on the build host |
+| `--keep` | keep the built disk in `cache/windows-image/` |
+
+The build host is Linux with `/dev/kvm` (your user in the `kvm` group) and Docker, with about
+100 GB free in the installer's directory, and the installer's access as for `apply` (its state
+key and cloud login: it reads the release and `[windows_registry]` from there). The host you run
+the installer on, if it has KVM; else any Linux host with KVM where you set the installer up, a
+worker for instance. On a cloud VM, nested virtualization must be on.
