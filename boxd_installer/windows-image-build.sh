@@ -54,9 +54,10 @@ case "$INDEX" in [1-9]) ;; *) die "--index is the ISO's image index, 1-9" ;; esa
 case "$SIZE" in [1-9]*G) ;; *) die "--size is a size in G, e.g. 32G" ;; esac
 NAME=${NAME:-win-$(date -u +%Y%m%d-%H%M%S)}
 case "$NAME" in *[!A-Za-z0-9._-]*) die "--name takes letters, digits, '.', '_' and '-'" ;; esac
-[ -r /dev/kvm ] && [ -w /dev/kvm ] ||
-    die "this host has no /dev/kvm it can use: build on a Linux host with KVM (a worker will do), as a user in the kvm group"
-docker info >/dev/null 2>&1 || die "Docker isn't usable here"
+# Docker hands /dev/kvm to the build's container, so it only has to exist here, and Docker be usable.
+[ -c /dev/kvm ] ||
+    die "this host has no /dev/kvm: build on a Linux host with KVM (on a cloud VM, nested virtualization on)"
+docker info >/dev/null 2>&1 || die "Docker isn't usable here (as this user: the docker group, or root)"
 
 field() { printf '%s\n' "${BOXD_KIT_INFO:-}" | sed -n "s/^$1=//p" | tail -1; }
 KIT_REL=$(field kit) IMAGE=$(field image) RELEASE=$(field release) DOCKER_REL=$(field docker_config)
@@ -77,6 +78,7 @@ trap cleanup EXIT
 
 echo "==> building $IMAGE from $ISO (release ${RELEASE:0:12}), as $NAME"
 # Your ISO where the kit looks for it: a hard link on the same file system, else a copy.
+mkdir -p "$KIT/dl"
 rm -f "$KIT/dl/win2025-eval.iso"
 ln "$ISO" "$KIT/dl/win2025-eval.iso" 2>/dev/null || cp --reflink=auto "$ISO" "$KIT/dl/win2025-eval.iso"
 # The image's own Administrator password, for the build only: every machine made from the image

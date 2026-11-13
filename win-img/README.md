@@ -187,7 +187,7 @@ Then `./boxd-install apply` makes it the cluster's Windows image. Options:
 | `--name NAME` | the build's name on the build host |
 | `--keep` | keep the built disk in `cache/windows-image/` |
 
-The build host is Linux with `/dev/kvm` (your user in the `kvm` group) and Docker, with about
+The build host is Linux with `/dev/kvm` and Docker (usable as your user), with about
 100 GB free in the installer's directory, and the installer's access as for `apply` (its state
 key and cloud login: it reads the release and `[windows_registry]` from there). The host you run
 the installer on, if it has KVM; else any Linux host with KVM where you set the installer up, a
