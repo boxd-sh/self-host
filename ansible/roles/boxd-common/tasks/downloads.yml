@@ -37,6 +37,17 @@
         group: "{{ boxd_group }}"
         mode: "0644"
 
+    # The Windows installer, when the bundle had its template.
+    - name: Ship install.ps1
+      copy:
+        src: "{{ item }}"
+        dest: /var/lib/boxd/downloads/install.ps1
+        owner: "{{ boxd_user }}"
+        group: "{{ boxd_group }}"
+        mode: "0644"
+      with_fileglob:
+        - "{{ boxd_downloads_local_dir }}/install.ps1"
+
     - name: Ship CLI manifests + version
       copy:
         src: "{{ item }}"

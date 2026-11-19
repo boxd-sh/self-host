@@ -681,8 +681,10 @@ class Renderer:
     def downloads(self) -> dict[str, str]:
         """CLI install artifacts served at app.<zone>/downloads. The binaries
         (all platforms) and the upstream
-        install script template come from the assets zip; this renders the
-        per-zone manifests and parameterizes the script."""
+        install script templates come from the assets zip; this renders the
+        per-zone manifests and parameterizes the scripts: install.sh, and
+        install.ps1 for Windows when the bundle has its template (older
+        bundles carry neither it nor the Windows binary)."""
         import hashlib
         import json
         import os
@@ -725,6 +727,15 @@ class Renderer:
     || echo "  ! run: ${{BINARY_NAME}} config set api-url https://{zone}"
 """
         files["downloads/install.sh"] = tpl
+        ps1_path = os.path.join(cli_dir, "install-template.ps1")
+        if os.path.exists(ps1_path):
+            ps1 = open(ps1_path).read()
+            for key, value in (("BaseUrl", base), ("ApiUrl", f"https://{zone}")):
+                ps1, n = _re.subn(rf'^\${key} = ".*"$', f'${key} = "{value}"', ps1, count=1,
+                                  flags=_re.M)
+                if n != 1:
+                    raise InstallError(f"install-template.ps1: ${key} line not found")
+            files["downloads/install.ps1"] = ps1
         return files
 
     def render_all(self) -> dict[str, str]:
