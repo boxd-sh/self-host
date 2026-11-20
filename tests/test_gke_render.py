@@ -409,9 +409,11 @@ class Downloads(unittest.TestCase):
     version and manifests) are mounted into it, on the console (app.<zone>/downloads)
     and on every proxy (<zone>/downloads, the URL the console hands out)."""
     DOWNLOADS = {"downloads/install.sh": "#!/bin/sh\n",
+                 "downloads/install.ps1": "$BaseUrl = \"\"\n",
                  "downloads/cli/cli-version.txt": "0.3.4\n",
                  "downloads/cli/latest-linux-amd64.json": "{}\n"}
     WANT = {"/usr/local/share/boxd/downloads/install.sh": "install.sh",
+            "/usr/local/share/boxd/downloads/install.ps1": "install.ps1",
             "/usr/local/share/boxd/downloads/cli/cli-version.txt": "cli-version.txt",
             "/usr/local/share/boxd/downloads/cli/latest-linux-amd64.json": "latest-linux-amd64.json"}
 

@@ -1505,17 +1505,28 @@ is the operator override for adding someone directly.
 
 ### The CLI your users install
 
-`https://app.<zone>` serves the boxd CLI for Linux and macOS, pre-configured
-for your cluster — it already points at your `app.<zone>`, so there is no
-endpoint to set:
+`https://app.<zone>` serves the boxd CLI for Linux, macOS and Windows,
+pre-configured for your cluster — it already points at your `app.<zone>`, so
+there is no endpoint to set:
 
 ```sh
 curl -fsSL https://app.<zone>/downloads/install.sh | sh
 boxd auth login        # opens the browser for a one-time device login
 ```
 
-It installs a binary named `boxd` into `~/.local/bin`, replacing any `boxd`
-CLI already there for another boxd service. One install sets up three things:
+On Windows, in PowerShell (not Git Bash, where `install.sh` stops and names
+this command):
+
+```powershell
+irm https://app.<zone>/downloads/install.ps1 | iex
+boxd auth login
+```
+
+A cluster installed from a release bundle before the Windows installer was in
+it serves no `install.ps1`; the next `apply` with a newer bundle adds it.
+
+It installs a binary named `boxd` into `~/.local/bin` (`boxd.exe` on Windows),
+replacing any `boxd` CLI already there for another boxd service. One install sets up three things:
 
 - **The binary.** Machines end to end: `boxd new` / `connect` / `list`,
   fork and snapshot, `machine exec`, file copy, HTTPS proxies and custom
@@ -1585,6 +1596,13 @@ public ingress that URL is on the internet, with
 >
 > ```sh
 > curl -fsSL https://app.<zone>/downloads/install.sh | sh
+> boxd auth login
+> ```
+>
+> On Windows, in PowerShell:
+>
+> ```powershell
+> irm https://app.<zone>/downloads/install.ps1 | iex
 > boxd auth login
 > ```
 >

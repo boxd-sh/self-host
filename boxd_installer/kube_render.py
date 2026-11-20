@@ -39,7 +39,7 @@ SECRET = "boxd-config"
 SRC = "/etc/boxd-src"
 # The CLI downloads live in the boxd image (the release's binaries and skills under
 # cli/); the installer adds only the files it renders for the zone (install.sh,
-# cli-version.txt, the latest-<platform>.json manifests), mounted one by one from the
+# install.ps1, cli-version.txt, the latest-<platform>.json manifests), mounted one by one from the
 # boxd-downloads ConfigMap. The console serves the directory at app.<zone>/downloads
 # (BOXD_CONSOLE_DOWNLOADS_DIR), the proxy at <zone>/downloads (its entrypoint links
 # the proxy's fixed /var/lib/boxd/downloads here). Nothing is copied, nothing is on a disk.
@@ -594,13 +594,14 @@ class KubeRenderer(render.Renderer):
     def _mount_downloads(downloads: dict[str, str] | None, mounts: list[dict],
                          volumes: list[dict]) -> None:
         """The zone's download files (render.downloads(): downloads/install.sh,
-        downloads/cli/<file>) into DOWNLOADS_DIR in the image, each from the
-        boxd-downloads ConfigMap (keyed by file name) at its own path."""
+        downloads/install.ps1, downloads/cli/<file>) into DOWNLOADS_DIR in the
+        image, each from the boxd-downloads ConfigMap (keyed by file name) at
+        its own path."""
         if not downloads:
             return
         for path in sorted(downloads):
             name = os.path.basename(path)
-            sub = "install.sh" if name == "install.sh" else f"cli/{name}"
+            sub = name if name in ("install.sh", "install.ps1") else f"cli/{name}"
             mounts.append({"name": "downloads", "mountPath": f"{DOWNLOADS_DIR}/{sub}",
                            "subPath": name, "readOnly": True})
         volumes.append({"name": "downloads", "configMap": {"name": "boxd-downloads"}})
