@@ -660,6 +660,7 @@ class ApplyOrder(unittest.TestCase):
              mock.patch.object(main, "log"), contextlib.redirect_stdout(io.StringIO()):
             main.assets.computer_image.return_value = ("computer", "v1")
             main.State.return_value.load_providers.return_value = {}
+            main.State.return_value.removed_members.return_value = {}
             main.license.free_tier_warnings.return_value = []
             main.license.key_path.return_value = os.path.join(d, "license.key")
             main._apply(cfg, args)
