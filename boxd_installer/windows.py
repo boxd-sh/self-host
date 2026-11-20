@@ -65,8 +65,8 @@ def on(doc: dict) -> bool:
 def image_host(ref: str) -> str:
     """The registry host of an image reference, as docker reads it: the first component when it
     has a dot or a port or is localhost, else Docker Hub."""
-    first, slash, _ = ref.partition("/")
-    if slash and ("." in first or ":" in first or first == "localhost"):
+    first, sep, _ = ref.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
         return first
     return "docker.io"
 
