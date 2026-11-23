@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from boxd_installer import config, license, main, telemetry, tf
+from boxd_installer import apply, config, license, main, telemetry, tf
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -50,7 +50,7 @@ class RemovedMembers(unittest.TestCase):
             return answer
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            out = main.check_removed_members(self.state, config.Config(doc),
+            out = apply.check_removed_members(self.state, config.Config(doc),
                                              ask if answer is not None else None)
         return out, err.getvalue(), prompts
 
@@ -86,7 +86,7 @@ class RemovedMembers(unittest.TestCase):
         err = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO("")), contextlib.redirect_stderr(err), \
                 mock.patch("builtins.input") as ask:
-            out = main.check_removed_members(self.state, config.Config(without(self.doc, EDGE)),
+            out = apply.check_removed_members(self.state, config.Config(without(self.doc, EDGE)),
                                              auto_approve=True)
         self.assertEqual(list(out), [EDGE])
         ask.assert_not_called()
@@ -118,7 +118,7 @@ class RemovedMembers(unittest.TestCase):
         old = {self.ids[f"{EDGE}/proxy"], self.ids[f"{EDGE}/dns"]}
         doc = without(self.doc, EDGE)
         removals, _, _ = self.check(doc, "y")
-        main.retire_removed(self.state, removals)
+        apply.retire_removed(self.state, removals)
         self.assertEqual(self.check(doc, "n")[0], {})                # asked once only
         self.assertTrue(old <= set(self.state.data["retired_node_ids"]))
         # The same name coming back is a new node: it never gets the old ids.
@@ -136,13 +136,13 @@ class ApplyAsksBeforeTerraform(unittest.TestCase):
                                      cache_dir=tempfile.mkdtemp(), auto_approve=False)
         with mock.patch.object(license, "key_path", return_value=None), \
                 mock.patch.object(telemetry, "errors", return_value=[]), \
-                mock.patch.object(main.sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(apply.sys.stdin, "isatty", return_value=True), \
                 mock.patch("builtins.input", return_value="n") as ask, \
                 mock.patch.object(State, "ensure_keypairs") as keys, \
                 mock.patch.object(tf, "init") as init, \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(InstallError):
-                main._apply(config.Config(without(doc, EDGE)), args)
+                apply._apply(config.Config(without(doc, EDGE)), args)
         ask.assert_called_once()
         keys.assert_not_called()
         init.assert_not_called()

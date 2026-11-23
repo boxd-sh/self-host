@@ -10,7 +10,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, main, render, tf
+from boxd_installer import apply, config, main, render, tf
 from boxd_installer.clouds import aws
 from boxd_installer.util import InstallError
 
@@ -291,9 +291,9 @@ class Routes(unittest.TestCase):
         with mock.patch.object(aws, "_describe", FakeEc2(priv_routes=())), \
                 self.assertRaisesRegex(InstallError, "the existing VPC can't take the cluster:\n"
                                        ".*has no 0.0.0.0/0 route"):
-            main.check_existing_vpc(cfg)
+            apply.check_existing_vpc(cfg)
         with mock.patch.object(aws, "_describe") as describe:
-            main.check_existing_vpc(config.Config(aws_doc()))
+            apply.check_existing_vpc(config.Config(aws_doc()))
         describe.assert_not_called()
 
     def test_cmd_validate_checks(self):

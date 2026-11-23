@@ -8,7 +8,7 @@ import os
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, cluster, config, main
+from boxd_installer import ansible, apply, cluster, config
 
 from test_gke_config import gke_doc
 
@@ -19,7 +19,7 @@ def gcp_doc() -> dict:
         return tomllib.load(fh)
 
 class Order(unittest.TestCase):
-    def run_phases(self, apply, doc, names, preflight):
+    def run_phases(self, run, doc, names, preflight):
         calls = mock.Mock()
         logs = []
         patches = {n: getattr(calls, n) for n in names}
@@ -27,13 +27,13 @@ class Order(unittest.TestCase):
         getattr(calls, names[1]).return_value = "tf_out"
         getattr(calls, names[2]).return_value = "renderer"
         calls._finish.return_value = 0
-        with mock.patch.multiple(main, log=logs.append, **patches):
-            self.assertEqual(apply(config.Config(doc), "args"), 0)
+        with mock.patch.multiple(apply, log=logs.append, **patches):
+            self.assertEqual(run(config.Config(doc), "args"), 0)
         return calls, [m.split(":")[0] for m in logs]
 
     def test_instances(self):
         names = ["_preflight", "_infrastructure", "_render_configs", "_converge", "_finish"]
-        calls, logs = self.run_phases(main._apply, gcp_doc(), names,
+        calls, logs = self.run_phases(apply._apply, gcp_doc(), names,
                                       ("state", "key", "removals", "assets", "storage"))
         self.assertEqual([c[0] for c in calls.mock_calls], names)
         cfg = calls._preflight.call_args.args[0]
@@ -43,11 +43,11 @@ class Order(unittest.TestCase):
                                                 "assets")
         calls._finish.assert_called_once_with(cfg, "args", "state", "renderer", "key", "storage",
                                               "assets")
-        self.assertEqual(logs, [f"phase {i}/5, {p}" for i, p in enumerate(main.PHASES, 1)])
+        self.assertEqual(logs, [f"phase {i}/5, {p}" for i, p in enumerate(apply.PHASES, 1)])
 
     def test_gke(self):
         names = ["_gke_preflight", "_gke_infrastructure", "_gke_render", "_gke_deploy", "_finish"]
-        calls, logs = self.run_phases(main._apply_gke, gke_doc(), names,
+        calls, logs = self.run_phases(apply._apply_gke, gke_doc(), names,
                                       ("state", "key", "facts", "assets", "storage"))
         self.assertEqual([c[0] for c in calls.mock_calls], names)
         cfg = calls._gke_preflight.call_args.args[0]
@@ -57,7 +57,7 @@ class Order(unittest.TestCase):
                                                   "tf_out")
         self.assertEqual(calls._finish.call_args.args,
                          (cfg, "args", "state", "renderer", "key", "storage", "assets"))
-        self.assertEqual(logs, [f"phase {i}/5, {p}" for i, p in enumerate(main.PHASES, 1)])
+        self.assertEqual(logs, [f"phase {i}/5, {p}" for i, p in enumerate(apply.PHASES, 1)])
 
 class Modules(unittest.TestCase):
     """ansible.py runs the playbook and nothing else; ssh and boxd-ctl are cluster.py."""

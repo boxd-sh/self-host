@@ -1,5 +1,5 @@
-"""`plan`: apply's checks before terraform and the same terraform plan step
-(_plan_instances on GCP and AWS, _plan_gke on GKE), then nothing else. The
+"""`plan` (apply.plan): apply's checks before terraform and the same terraform plan
+step (_plan_instances on GCP and AWS, _plan_gke on GKE), then nothing else. The
 installer state is read and thrown away, never pushed. Bare metal has no
 terraform. Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
@@ -13,7 +13,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, main
+from boxd_installer import apply, config, main
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -59,18 +59,17 @@ class Plan(unittest.TestCase):
         cc = mock.Mock(plan_json=mock.Mock(return_value={}),
                        replaced_nodes=mock.Mock(return_value=list(replaced)))
         err = io.StringIO()
-        with mock.patch.object(main.config, "load", return_value=config.Config(doc)), \
-             mock.patch.multiple(main.remote_state, pull=pull,
+        with mock.patch.multiple(apply.remote_state, pull=pull,
                                  push=mock.Mock(side_effect=AssertionError("pushed")),
                                  synced=mock.Mock(side_effect=AssertionError("synced"))), \
-             mock.patch.multiple(main, _plan_instances=plan_instances, _plan_gke=gke_plan,
+             mock.patch.multiple(apply, _plan_instances=plan_instances, _plan_gke=gke_plan,
                                  _gke_checks=lambda cfg, state: calls.append("gke_checks")
                                  or {"vpc_mtu": 1460},
                                  control_carry=cc,
                                  tf=mock.Mock(side_effect=AssertionError("tf"))), \
              mock.patch.object(State, "ensure_keypairs", lambda s: calls.append("keys")), \
              contextlib.redirect_stderr(err):
-            self.assertEqual(main.cmd_plan(self.args), 0)
+            self.assertEqual(apply.plan(config.Config(doc), self.args), 0)
         # The pulled state holds secrets: gone after.
         self.assertFalse(os.path.exists(self.state_dir))
         return calls, err.getvalue()
@@ -115,19 +114,26 @@ class Plan(unittest.TestCase):
         self.assertIn(f"replaces control node(s) {control};", err)
 
     def test_metal_refused_before_anything(self):
-        with mock.patch.object(main.config, "load", return_value=config.Config(metal_doc())), \
-             mock.patch.object(main.remote_state, "pull", side_effect=AssertionError("pulled")), \
+        with mock.patch.object(apply.remote_state, "pull", side_effect=AssertionError("pulled")), \
              self.assertRaisesRegex(InstallError, "bare metal has no terraform"):
-            main.cmd_plan(self.args)
+            apply.plan(config.Config(metal_doc()), self.args)
+
+    def test_the_command_loads_cluster_toml_and_plans(self):
+        cfg = config.Config(example("gcp"))
+        with mock.patch.object(main.config, "load", return_value=cfg) as load, \
+             mock.patch.object(main.apply, "plan", return_value=0) as plan:
+            self.assertEqual(main.cmd_plan(self.args), 0)
+        load.assert_called_once_with("unused")
+        plan.assert_called_once_with(cfg, self.args)
 
 class SameStepsAsApply(unittest.TestCase):
     """plan and apply share the terraform step, so a plan is the one apply makes."""
     def test_apply_uses_the_shared_steps(self):
         self.assertIn("_plan_instances(cfg, state, args.out_dir)",
-                      inspect.getsource(main._infrastructure))
-        self.assertIn("_gke_checks(cfg, state)", inspect.getsource(main._gke_preflight))
+                      inspect.getsource(apply._infrastructure))
+        self.assertIn("_gke_checks(cfg, state)", inspect.getsource(apply._gke_preflight))
         self.assertIn("_plan_gke(cfg, state, args.out_dir, facts)",
-                      inspect.getsource(main._gke_infrastructure))
+                      inspect.getsource(apply._gke_infrastructure))
 
 if __name__ == "__main__":
     unittest.main()

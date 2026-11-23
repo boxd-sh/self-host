@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import cluster, config, local_ca, main, render, storage_engine, tf
+from boxd_installer import apply, cluster, config, local_ca, main, render, storage_engine, tf
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -632,17 +632,17 @@ class ApplyOrder(unittest.TestCase):
         se = mock.Mock(check_guard=calls.check_guard, adopt_prefix=calls.adopt_prefix,
                        check_identity=calls.check_identity, wait_bucket_open=calls.wait_bucket_open,
                        set_switches=calls.set_switches, template_storage=calls.template_storage)
-        with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
+        with mock.patch.multiple(apply, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
                                  render=mock.DEFAULT, license=mock.DEFAULT,
                                  check_storage_bundle=mock.DEFAULT, storage_engine=se), \
-             mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=calls.tf_plan,
+             mock.patch.multiple(apply.tf, init=mock.DEFAULT, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.object(main.ansible, "converge", calls.converge), \
-             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(apply.ansible, "converge", calls.converge), \
+             mock.patch.multiple(apply.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  wait_for_leader=mock.DEFAULT,
                                  sync_config=mock.DEFAULT,
@@ -658,13 +658,13 @@ class ApplyOrder(unittest.TestCase):
                                  set_telemetry=mock.DEFAULT,
                                  seed_templates=calls.seed_templates, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
-             mock.patch.object(main, "log"), contextlib.redirect_stdout(io.StringIO()):
-            main.assets.computer_image.return_value = ("computer", "v1")
-            main.State.return_value.load_providers.return_value = {}
-            main.State.return_value.removed_members.return_value = {}
-            main.license.free_tier_warnings.return_value = []
-            main.license.key_path.return_value = os.path.join(d, "license.key")
-            main._apply(cfg, args)
+             mock.patch.object(apply, "log"), contextlib.redirect_stdout(io.StringIO()):
+            apply.assets.computer_image.return_value = ("computer", "v1")
+            apply.State.return_value.load_providers.return_value = {}
+            apply.State.return_value.removed_members.return_value = {}
+            apply.license.free_tier_warnings.return_value = []
+            apply.license.key_path.return_value = os.path.join(d, "license.key")
+            apply._apply(cfg, args)
         names = [c[0] for c in calls.mock_calls]
         at = names.index
         self.assertLess(at("check_guard"), at("tf_plan"))

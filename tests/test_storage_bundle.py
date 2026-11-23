@@ -8,7 +8,7 @@ import os
 import tempfile
 import unittest
 
-from boxd_installer import assets, config, main
+from boxd_installer import apply, assets, config
 from boxd_installer.util import InstallError
 from test_assets_channels import doc
 from test_release_bundles import NEEDS_ED25519, SHA, Case
@@ -86,16 +86,16 @@ class FailClosed(unittest.TestCase):
         return config.Config(d)
 
     def test_without_the_table_any_bundle_goes(self):
-        main.check_storage_bundle(self.cfg(False), unpacked({"git_sha": SHA}))
+        apply.check_storage_bundle(self.cfg(False), unpacked({"git_sha": SHA}))
 
     def test_a_file_only_bundle_is_refused(self):
         for manifest in ({"git_sha": SHA}, {"git_sha": SHA, "features": []}):
             with self.assertRaisesRegex(InstallError, "is one without it.*license key that "
                                         "includes it"):
-                main.check_storage_bundle(self.cfg(True), unpacked(manifest))
+                apply.check_storage_bundle(self.cfg(True), unpacked(manifest))
 
     def test_a_storage_bundle_passes(self):
-        main.check_storage_bundle(self.cfg(True), unpacked({"git_sha": SHA, "features": ["bucket"]}))
+        apply.check_storage_bundle(self.cfg(True), unpacked({"git_sha": SHA, "features": ["bucket"]}))
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-from boxd_installer import cluster, config, main, render, telemetry
+from boxd_installer import apply, cluster, config, main, render, telemetry
 from boxd_installer.util import InstallError
 
 from test_machine_sizes import FakeAlloc, FakeState, aws_doc, validate
@@ -177,17 +177,17 @@ class ApplyPassesTheSetting(Isolated):
         cfg = config.Config(doc, self.dir)
         calls = mock.Mock()
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
-        with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
+        with mock.patch.multiple(apply, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
                                  render=mock.DEFAULT, license=mock.DEFAULT,
                                  storage_engine=mock.DEFAULT), \
-             mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
+             mock.patch.multiple(apply.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.object(main.ansible, "converge", mock.Mock()), \
-             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(apply.ansible, "converge", mock.Mock()), \
+             mock.patch.multiple(apply.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
@@ -199,12 +199,12 @@ class ApplyPassesTheSetting(Isolated):
                                  set_telemetry=calls.set_telemetry,
                                  seed_templates=mock.DEFAULT, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
-             mock.patch.object(main, "log"), redirect_stdout(io.StringIO()):
-            main.assets.computer_image.return_value = ("computer", "v1")
-            main.State.return_value.load_providers.return_value = {}
-            main.State.return_value.removed_members.return_value = {}
-            main.license.free_tier_warnings.return_value = []
-            main._apply(cfg, args)
+             mock.patch.object(apply, "log"), redirect_stdout(io.StringIO()):
+            apply.assets.computer_image.return_value = ("computer", "v1")
+            apply.State.return_value.load_providers.return_value = {}
+            apply.State.return_value.removed_members.return_value = {}
+            apply.license.free_tier_warnings.return_value = []
+            apply._apply(cfg, args)
         return calls.set_telemetry
 
     def test_the_configs_are_written_before_the_converge(self):
@@ -215,17 +215,17 @@ class ApplyPassesTheSetting(Isolated):
         cfg = config.Config(with_telemetry(False), self.dir)
         calls = mock.Mock()
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
-        with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
+        with mock.patch.multiple(apply, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
                                  render=mock.DEFAULT, license=mock.DEFAULT,
-                                 storage_engine=mock.DEFAULT, _write_out=calls.write_out), \
-             mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
+                                 storage_engine=mock.DEFAULT, write_out=calls.write_out), \
+             mock.patch.multiple(apply.tf, init=mock.DEFAULT, plan=mock.DEFAULT,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.object(main.ansible, "converge", calls.converge), \
-             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(apply.ansible, "converge", calls.converge), \
+             mock.patch.multiple(apply.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
@@ -237,13 +237,13 @@ class ApplyPassesTheSetting(Isolated):
                                  set_telemetry=calls.set_telemetry,
                                  seed_templates=mock.DEFAULT, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
-             mock.patch.object(main, "log"), redirect_stdout(io.StringIO()):
-            main.assets.computer_image.return_value = ("computer", "v1")
-            main.State.return_value.load_providers.return_value = {}
-            main.State.return_value.removed_members.return_value = {}
-            main.license.free_tier_warnings.return_value = []
-            main.render.Renderer.return_value.render_all.return_value = {"rendered": "x"}
-            main._apply(cfg, args)
+             mock.patch.object(apply, "log"), redirect_stdout(io.StringIO()):
+            apply.assets.computer_image.return_value = ("computer", "v1")
+            apply.State.return_value.load_providers.return_value = {}
+            apply.State.return_value.removed_members.return_value = {}
+            apply.license.free_tier_warnings.return_value = []
+            apply.render.Renderer.return_value.render_all.return_value = {"rendered": "x"}
+            apply._apply(cfg, args)
         names = [c[0] for c in calls.mock_calls]
         self.assertLess(names.index("write_out"), names.index("converge"))
         self.assertLess(names.index("converge"), names.index("set_telemetry"))

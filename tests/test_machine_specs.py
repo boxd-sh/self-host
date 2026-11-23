@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-from boxd_installer import cluster, config, main
+from boxd_installer import apply, cluster, config
 from boxd_installer.util import InstallError
 
 import test_license  # the module, not its classes: unittest would run those again here
@@ -103,7 +103,7 @@ class BundleChanges(unittest.TestCase):
             with self.subTest(applied=applied):
                 state = types.SimpleNamespace(data={} if applied is None
                                               else {"applied_assets": applied})
-                self.assertIs(main.bundle_changes(state, cfg), want)
+                self.assertIs(apply.bundle_changes(state, cfg), want)
 
 
 class ApplyOrder(test_license.LicenseCluster):
@@ -119,7 +119,7 @@ class ApplyOrder(test_license.LicenseCluster):
         self.assertLess(names.index("turn_on_machine_specs"), names.index("seed_templates"))
 
     def test_same_bundle_no_pause(self):
-        with mock.patch.object(main, "bundle_changes", return_value=False):
+        with mock.patch.object(apply, "bundle_changes", return_value=False):
             names = self.names(self.apply(test_license.without_type(aws_doc(), key_file=False),
                                           {}))
         self.assertNotIn("pause_machine_specs", names)

@@ -10,7 +10,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, main, render
+from boxd_installer import apply, config, render
 from boxd_installer.state import State, generate_egress_ca
 from boxd_installer.util import InstallError
 
@@ -89,12 +89,12 @@ class Ensure(unittest.TestCase):
         self.state = State(self.dir)
 
     def ensure(self, worker_pair=None):
-        with mock.patch.object(main.cluster, "worker_egress_ca",
+        with mock.patch.object(apply.cluster, "worker_egress_ca",
                                return_value=worker_pair) as read, \
-                mock.patch.object(main, "generate_egress_ca",
+                mock.patch.object(apply, "generate_egress_ca",
                                   return_value=("NEW-CERT", "NEW-KEY")) as gen, \
-                mock.patch.object(main, "log"):
-            main.ensure_egress_ca(self.cfg, self.state)
+                mock.patch.object(apply, "log"):
+            apply.ensure_egress_ca(self.cfg, self.state)
         return read, gen
 
     def test_new_cluster_makes_one_without_asking_the_workers(self):

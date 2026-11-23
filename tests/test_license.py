@@ -16,7 +16,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import cluster, config, license, main, telemetry, tf
+from boxd_installer import apply, cluster, config, license, main, telemetry, tf
 from boxd_installer.util import InstallError
 
 from test_machine_sizes import FakeState, aws_doc, validate
@@ -460,19 +460,19 @@ class ApplyOrder(LicenseCluster):
         cfg = config.Config(doc, self.dir)
         calls = calls or mock.Mock()
         args = mock.Mock(state_dir=self.dir, out_dir=self.dir, cache_dir=self.dir)
-        with mock.patch.multiple(main, State=mock.DEFAULT, assets=mock.DEFAULT,
+        with mock.patch.multiple(apply, State=mock.DEFAULT, assets=mock.DEFAULT,
                                  control_carry=mock.DEFAULT, composio=mock.DEFAULT,
                                  render=mock.DEFAULT, storage_engine=mock.DEFAULT,
                                  check_existing_vpc=calls.check_existing_vpc), \
-             mock.patch.multiple(main.tf, init=calls.tf_init, plan=calls.tf_plan,
+             mock.patch.multiple(apply.tf, init=calls.tf_init, plan=calls.tf_plan,
                                  apply_plan=mock.DEFAULT, read_outputs=mock.DEFAULT,
                                  write_tfvars=calls.write_tfvars,
                                  instance_types=mock.Mock(return_value=existing),
                                  # The example's workers are on EBS.
                                  data_volumes=mock.Mock(return_value=set(existing)),
                                  network=mock.Mock(return_value=(network, network_ids or {}))), \
-             mock.patch.object(main.ansible, "converge", calls.converge), \
-             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(apply.ansible, "converge", calls.converge), \
+             mock.patch.multiple(apply.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
                                  wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
@@ -486,12 +486,12 @@ class ApplyOrder(LicenseCluster):
                                  seed_templates=calls.seed_templates,
                                  configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
-             mock.patch.object(main, "log", side_effect=lambda m: calls.log(m)), \
+             mock.patch.object(apply, "log", side_effect=lambda m: calls.log(m)), \
              contextlib.redirect_stdout(io.StringIO()):
-            main.assets.computer_image.return_value = ("computer", "v1")
-            main.State.return_value.load_providers.return_value = {}
-            main.State.return_value.removed_members.return_value = {}
-            main._apply(cfg, args)
+            apply.assets.computer_image.return_value = ("computer", "v1")
+            apply.State.return_value.load_providers.return_value = {}
+            apply.State.return_value.removed_members.return_value = {}
+            apply._apply(cfg, args)
         return calls
 
     def names(self, calls) -> list[str]:

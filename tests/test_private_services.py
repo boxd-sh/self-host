@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 import unittest
 
-from boxd_installer import config, local_ca, main, private_services, render
+from boxd_installer import apply, config, local_ca, private_services, render
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -243,14 +243,14 @@ class BridgesBeforeTerraform(unittest.TestCase):
         st = self.state({WORKER: 0})
         self.assertEqual(st.bridge_indexes_for(cfg), {WORKER: 0, "boxd-aws-demo-worker-1": 1})
         with self.assertRaisesRegex(InstallError, "10.101.0.0/16 of boxd-aws-demo-worker-1"):
-            main.check_private_service_bridges(cfg, st)
+            apply.check_private_service_bridges(cfg, st)
         self.assertEqual(State(self.dir).data["bridge_indexes"], {WORKER: 0}, "nothing saved")
-        main.check_private_service_bridges(self.two_workers({**DB, "target": "10.70.8.50"}), st)
+        apply.check_private_service_bridges(self.two_workers({**DB, "target": "10.70.8.50"}), st)
 
     def test_a_removed_workers_index_still_counts(self):
         cfg = config.Config(with_services({**DB, "target": "10.101.3.4"}))
         with self.assertRaisesRegex(InstallError, "of gone-worker"):
-            main.check_private_service_bridges(cfg, self.state({WORKER: 0, "gone-worker": 1}))
+            apply.check_private_service_bridges(cfg, self.state({WORKER: 0, "gone-worker": 1}))
 
     def test_allocate_gives_the_same_indexes(self):
         cfg = self.two_workers(ALB)
@@ -264,10 +264,10 @@ class BridgesBeforeTerraform(unittest.TestCase):
         import inspect
         # apply: in preflight, the phase before terraform.
         self.assertIn("check_private_service_bridges(cfg, state)",
-                      inspect.getsource(main._preflight))
-        apply = inspect.getsource(main._apply)
-        self.assertLess(apply.index("_preflight("), apply.index("_infrastructure("))
-        plan = inspect.getsource(main.cmd_plan)
+                      inspect.getsource(apply._preflight))
+        src = inspect.getsource(apply._apply)
+        self.assertLess(src.index("_preflight("), src.index("_infrastructure("))
+        plan = inspect.getsource(apply.plan)
         self.assertLess(plan.index("check_private_service_bridges(cfg, state)"),
                         plan.index("_plan_instances("))
 
@@ -282,9 +282,9 @@ class ReleaseGate(unittest.TestCase):
     def test_a_release_without_the_relay_is_refused(self):
         cfg = config.Config(with_services(ALB))
         with self.assertRaisesRegex(InstallError, "lists no bin/boxd-relay"):
-            main.check_relay_bundle(cfg, self.bundle({"bin/boxd-worker": "h"}))
-        main.check_relay_bundle(cfg, self.bundle({"bin/boxd-worker": "h", "bin/boxd-relay": "h"}))
-        main.check_relay_bundle(config.Config(aws_doc()), self.bundle({}))
+            apply.check_relay_bundle(cfg, self.bundle({"bin/boxd-worker": "h"}))
+        apply.check_relay_bundle(cfg, self.bundle({"bin/boxd-worker": "h", "bin/boxd-relay": "h"}))
+        apply.check_relay_bundle(config.Config(aws_doc()), self.bundle({}))
 
 @unittest.skipUnless(BASH, "needs bash >= 4")
 class Firewall(unittest.TestCase):
