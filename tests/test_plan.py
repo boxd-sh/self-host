@@ -78,14 +78,17 @@ class Plan(unittest.TestCase):
         calls, err = self.run_plan(example("gcp"), prior=example("gcp"))
         self.assertEqual(calls, ["pull", "keys", "plan_instances"])
         self.assertNotIn("placeholder", err)
+        # terraform's own `terraform apply "<file>"` hint names a file plan deletes.
+        self.assertIn("nothing was changed. To make these changes run `./boxd-install apply`", err)
 
     def test_aws(self):
         calls, _ = self.run_plan(example("aws"), prior=example("aws"))
         self.assertEqual(calls, ["pull", "keys", "plan_instances"])
 
     def test_gke(self):
-        calls, _ = self.run_plan(gke_doc())
+        calls, err = self.run_plan(gke_doc())
         self.assertEqual(calls, ["pull", "gke_checks", "keys", "plan_gke"])
+        self.assertIn("nothing was changed", err)
 
     def test_gke_plan_refused_is_an_error_and_state_still_deleted(self):
         def refuse():

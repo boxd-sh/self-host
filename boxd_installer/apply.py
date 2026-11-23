@@ -306,14 +306,20 @@ def plan(cfg, args) -> int:
         os.makedirs(args.out_dir, exist_ok=True)
         if on_gke:
             _plan_gke(cfg, state, args.out_dir, facts)
-            return 0
-        check_private_service_bridges(cfg, state)
-        path = _plan_instances(cfg, state, args.out_dir)
-        control = {n.name for n in cfg.nodes_with("control")}
-        if replaced := [n for n in control_carry.replaced_nodes(control_carry.plan_json(cfg, path))
-                        if n in control]:
-            log(f"note: this plan replaces control node(s) {', '.join(replaced)}; apply "
-                "carries their state over to the new instances")
+        else:
+            check_private_service_bridges(cfg, state)
+            path = _plan_instances(cfg, state, args.out_dir)
+            control = {n.name for n in cfg.nodes_with("control")}
+            if replaced := [n for n in
+                            control_carry.replaced_nodes(control_carry.plan_json(cfg, path))
+                            if n in control]:
+                log(f"note: this plan replaces control node(s) {', '.join(replaced)}; apply "
+                    "carries their state over to the new instances")
+        # terraform ends with a `terraform apply "<plan file>"` hint. That file
+        # is in the out dir, which is deleted after unless --out-dir was given.
+        log("nothing was changed. To make these changes run `./boxd-install apply`, which "
+            "plans again; terraform's own `terraform apply` hint above does not apply here "
+            "(the plan file is kept only with --out-dir)")
     finally:
         shutil.rmtree(args.state_dir, ignore_errors=True)
     return 0
