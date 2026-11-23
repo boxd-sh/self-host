@@ -57,6 +57,19 @@ resource "google_compute_router_nat" "nat" {
   region                             = var.region
   nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  # Workers egress for every microVM they host, often to one address (an LLM API's
+  # :443), so the default 64 static ports per VM run out (OUT_OF_RESOURCES drops).
+  # Dynamic allocation grows a VM's share on demand; it needs endpoint-independent
+  # mapping off. Errors-only logging records drops without the cost of every flow.
+  enable_dynamic_port_allocation      = true
+  enable_endpoint_independent_mapping = false
+  min_ports_per_vm                    = 256
+  max_ports_per_vm                    = 8192
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
 }
 
 resource "google_compute_firewall" "iap_ssh" {

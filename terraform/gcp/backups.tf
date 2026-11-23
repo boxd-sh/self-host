@@ -1,11 +1,11 @@
 resource "google_storage_bucket" "backups" {
-  count = var.enable_backups ? 1 : 0
+  count    = var.enable_backups ? 1 : 0
   name     = "${var.project}-backups"
   location = var.region
   project  = var.project
 
   uniform_bucket_level_access = true
-  force_destroy = false
+  force_destroy               = false
 
   depends_on = [google_project_service.services]
 }

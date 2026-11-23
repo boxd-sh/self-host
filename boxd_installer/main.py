@@ -135,6 +135,76 @@ def cmd_apply(args) -> int:
             return _apply_gke(cfg, args)
         return _apply(cfg, args)
 
+def _removal_steps(role: str, node_id: int) -> list[str]:
+    """What taking one Raft member out does to the cluster, and what must be
+    run before the apply that drops it (check_removed_members)."""
+    if role == "worker":
+        wid = f"worker-{node_id}"
+        return [f"worker {wid}: every machine on it goes with it. Move them off and retire it "
+                "first:",
+                f"    boxd-ctl node drain {wid}",
+                f"    boxd-ctl node mark-dead {wid}",
+                f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
+    if role == "proxy":
+        return [f"proxy proxy-{node_id}: every machine placed on it resolves to it and has its "
+                "SSH port there. boxd can't move machines to another proxy yet, so they become "
+                "unreachable, and new machines keep landing on it. There is no procedure for "
+                "this yet: put the node back and ask boxd."]
+    if role == "dns":
+        return ["nameserver: it is in your zone's delegation. Take its NS record and its glue "
+                "(A) record out at your DNS provider and wait out their TTL first, then:",
+                f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
+    return [f"control (Raft voter {node_id}): if the voters left lose their quorum, the whole "
+            "cluster stops. Ask boxd first; the voter leaves with:",
+            f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
+
+def check_removed_members(state, cfg, ask=None,
+                          auto_approve: bool = False) -> dict[str, dict[str, int]]:
+    """An apply whose cluster.toml has dropped a Raft member (a node, or one
+    of its roles) takes it out of the cluster, and on a cloud terraform
+    deletes its instance. Nothing in the cluster forgets it on its own, so
+    say what that breaks and what to run first, and go on only on a yes.
+    Returns what was confirmed, for retire_removed. `ask` is the prompt
+    (input() at a terminal); without a terminal the apply stops, unless
+    --auto-approve answered yes up front (the warning still goes to the log)."""
+    removed = state.removed_members(cfg)
+    if not removed:
+        return {}
+    lines = ["cluster.toml no longer lists these nodes (or roles), so this apply takes them "
+             "out of the cluster" + (", and terraform deletes their instances"
+                                     if clouds.provisions(cfg) else "") + ".",
+             "Until the steps below are done, that leaves the cluster unusable:"]
+    for name, roles in removed.items():
+        lines.append(f"  {name}")
+        lines += [f"    {line}" for role, node_id in roles.items()
+                  for line in _removal_steps(role, node_id)]
+    lines += ["Run boxd-ctl on a control node; remove-peer only on the leader, which "
+              "`boxd-ctl status` names (OPERATIONS.md, \"Getting started\").",
+              "Not removing them? Put them back in cluster.toml with the same name, roles and "
+              "internal_ip."]
+    warning = "\n".join(lines)
+    if auto_approve:
+        print(f"warning: {warning}\n--auto-approve: taking them out", file=sys.stderr)
+        return removed
+    if ask is None:
+        if not sys.stdin.isatty():
+            raise InstallError(warning + "\nThis apply needs a yes at a terminal, or "
+                               "--auto-approve; nothing was changed.")
+        ask = input
+    print(f"warning: {warning}", file=sys.stderr)
+    answer = ask("Have you run these steps, and should this apply take them out? [y/N] ")
+    if answer.strip().lower() not in ("y", "yes"):
+        raise InstallError("apply stopped; nothing was changed")
+    return removed
+
+def retire_removed(state, removals: dict[str, dict[str, int]]) -> None:
+    """Forget the ids of the nodes the apply took out, for good: the next
+    apply doesn't ask about them again, and no node gets their ids."""
+    for name, roles in removals.items():
+        for role in roles:
+            if (node_id := state.retire_node_id(f"{name}/{role}")) is not None:
+                log(f"{name} ({role}) removed; node id {node_id} retired")
+
 def _apply(cfg, args) -> int:
     # Before anything else: a [license].key_file that is missing or not a
     # key stops the apply; it never falls back to the free tier.
@@ -143,6 +213,8 @@ def _apply(cfg, args) -> int:
         raise InstallError("; ".join(errs))
     check_existing_vpc(cfg)
     state = State(args.state_dir)
+    # Before terraform, which would delete a dropped node's instance.
+    removals = check_removed_members(state, cfg, auto_approve=args.auto_approve)
     # The render would refuse a half-configured [oidc] only after terraform.
     oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
     if oidc_table and (why := render.oidc_render_error(oidc_table)):
@@ -184,6 +256,8 @@ def _apply(cfg, args) -> int:
         # Before the apply: a replaced control node takes its state with it.
         control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
         tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
+    # The removed nodes' instances are gone now (on metal, out of the config).
+    retire_removed(state, removals)
     tf_out = tf.read_outputs(cfg, state)
     ansible.set_tf_outputs(tf_out)
 
@@ -814,7 +888,10 @@ def main() -> int:
     sub.add_parser("validate")
     pr = sub.add_parser("render")
     pr.add_argument("--fake-tf", help="JSON file standing in for terraform outputs")
-    sub.add_parser("apply")
+    pa = sub.add_parser("apply")
+    pa.add_argument("-y", "--auto-approve", action="store_true",
+                    help="don't ask before taking out nodes that cluster.toml no longer lists "
+                         "(the warning is still printed)")
     sub.add_parser("destroy")
     pc = sub.add_parser("ctl", help="run boxd-ctl on the cluster: ctl -- <args>",
                         description="boxd-ctl on a control node (on GKE, in the control-0 pod), "
