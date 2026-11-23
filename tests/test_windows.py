@@ -183,9 +183,12 @@ class LicenseFeature(unittest.TestCase):
 
     def test_validate_and_apply_check_it_before_terraform(self):
         self.assertIn("windows.errors(cfg)", inspect.getsource(main.cmd_validate))
-        for cmd in (main._apply, main.cmd_plan):
-            src = inspect.getsource(cmd)
-            self.assertLess(src.index("windows.errors(cfg)"), src.index("_plan_instances("))
+        # apply: in preflight, the phase before terraform.
+        self.assertIn("windows.errors(cfg)", inspect.getsource(main._preflight))
+        apply = inspect.getsource(main._apply)
+        self.assertLess(apply.index("_preflight("), apply.index("_infrastructure("))
+        plan = inspect.getsource(main.cmd_plan)
+        self.assertLess(plan.index("windows.errors(cfg)"), plan.index("_plan_instances("))
 
 
 class ReleaseGate(unittest.TestCase):
@@ -213,9 +216,9 @@ class ReleaseGate(unittest.TestCase):
         log.assert_not_called()
 
     def test_it_runs_before_terraform(self):
-        src = inspect.getsource(main._apply)
-        self.assertLess(src.index("windows.check_bundle(cfg, assets_root)"),
-                        src.index("_plan_instances("))
+        self.assertIn("windows.check_bundle(cfg, assets_root)", inspect.getsource(main._preflight))
+        apply = inspect.getsource(main._apply)
+        self.assertLess(apply.index("_preflight("), apply.index("_infrastructure("))
 
     def test_the_worker_files(self):
         full = self.bundle("bin/uefi.fd", "bin/boxd-sdk.exe", "bin/boxd-run.exe")

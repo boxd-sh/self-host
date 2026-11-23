@@ -262,10 +262,14 @@ class BridgesBeforeTerraform(unittest.TestCase):
 
     def test_it_runs_before_terraform(self):
         import inspect
-        for cmd in (main._apply, main.cmd_plan):
-            src = inspect.getsource(cmd)
-            self.assertLess(src.index("check_private_service_bridges(cfg, state)"),
-                            src.index("_plan_instances("))
+        # apply: in preflight, the phase before terraform.
+        self.assertIn("check_private_service_bridges(cfg, state)",
+                      inspect.getsource(main._preflight))
+        apply = inspect.getsource(main._apply)
+        self.assertLess(apply.index("_preflight("), apply.index("_infrastructure("))
+        plan = inspect.getsource(main.cmd_plan)
+        self.assertLess(plan.index("check_private_service_bridges(cfg, state)"),
+                        plan.index("_plan_instances("))
 
 class ReleaseGate(unittest.TestCase):
     def bundle(self, files: dict) -> str:

@@ -586,7 +586,9 @@ class ApplyOrder(LicenseCluster):
         with self.assertRaises(InstallError) as e:
             self.apply(without_type(aws_doc()), {}, calls)
         self.assertIn("does not exist", str(e.exception))
-        self.assertEqual(calls.mock_calls, [], "nothing ran: no terraform, no tfvars")
+        # Only the phase's log line: no terraform, no tfvars.
+        self.assertEqual([c for c in calls.mock_calls if c[0] != "log"], [],
+                         "nothing ran: no terraform, no tfvars")
 
 
 if __name__ == "__main__":

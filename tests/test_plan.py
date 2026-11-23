@@ -123,10 +123,11 @@ class Plan(unittest.TestCase):
 class SameStepsAsApply(unittest.TestCase):
     """plan and apply share the terraform step, so a plan is the one apply makes."""
     def test_apply_uses_the_shared_steps(self):
-        self.assertIn("_plan_instances(cfg, state, args.out_dir)", inspect.getsource(main._apply))
-        gke_src = inspect.getsource(main._apply_gke)
-        self.assertIn("_gke_checks(cfg, state)", gke_src)
-        self.assertIn("_plan_gke(cfg, state, args.out_dir, facts)", gke_src)
+        self.assertIn("_plan_instances(cfg, state, args.out_dir)",
+                      inspect.getsource(main._infrastructure))
+        self.assertIn("_gke_checks(cfg, state)", inspect.getsource(main._gke_preflight))
+        self.assertIn("_plan_gke(cfg, state, args.out_dir, facts)",
+                      inspect.getsource(main._gke_infrastructure))
 
 if __name__ == "__main__":
     unittest.main()

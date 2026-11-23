@@ -316,7 +316,32 @@ def retire_removed(state, removals: dict[str, dict[str, int]]) -> None:
             if (node_id := state.retire_node_id(f"{name}/{role}")) is not None:
                 log(f"{name} ({role}) removed; node id {node_id} retired")
 
+# apply's five phases, in order, on every target (docs/ARCHITECTURE.md).
+PHASES = ("preflight", "infrastructure", "render", "converge", "finish")
+
+def _phase(name: str, what: str) -> None:
+    log(f"phase {PHASES.index(name) + 1}/{len(PHASES)}, {name}: {what}")
+
 def _apply(cfg, args) -> int:
+    """apply on instances (GCP, AWS) and on bare metal: the five phases, one
+    function each. Nothing in the cloud or on a node changes before
+    infrastructure."""
+    _phase("preflight", "checks, before anything changes")
+    state, key, removals, assets_root, storage = _preflight(cfg, args)
+    _phase("infrastructure", "terraform" if clouds.provisions(cfg)
+           else "the hosts exist, so there is nothing to create")
+    tf_out = _infrastructure(cfg, args, state, removals)
+    _phase("render", "every node's config")
+    r = _render_configs(cfg, args, state, tf_out, assets_root)
+    _phase("converge", "ansible on every node, then the nodes join the cluster")
+    _converge(cfg, args, state, r, storage, assets_root)
+    _phase("finish", "settings on the running cluster")
+    return _finish(cfg, args, state, r, key, storage, assets_root)
+
+def _preflight(cfg, args):
+    """Phase 1: every check that needs no node and no terraform apply, the
+    keys, and the assets bundle. Returns (state, license key path, the removals
+    confirmed, assets root, storage guard) for the later phases."""
     # Before anything else: a [license].key_file that is missing or not a
     # key stops the apply; it never falls back to the free tier.
     key = license.key_path(cfg)
@@ -344,7 +369,11 @@ def _apply(cfg, args) -> int:
     # bucket are one-way (storage_engine.check_guard).
     storage = storage_engine.check_guard(cfg, state, assets_root)
     assets.console_tarball(assets_root)
+    return state, key, removals, assets_root, storage
 
+def _infrastructure(cfg, args, state, removals) -> dict:
+    """Phase 2: terraform makes the network, the instances and the buckets
+    (terraform/<cloud>). Returns its outputs."""
     # metal: the hosts exist, so there is nothing to plan or replace.
     if clouds.provisions(cfg):
         plan = _plan_instances(cfg, state, args.out_dir)
@@ -355,7 +384,12 @@ def _apply(cfg, args) -> int:
     retire_removed(state, removals)
     tf_out = tf.read_outputs(cfg, state)
     cluster.set_tf_outputs(tf_out)
+    return tf_out
 
+def _render_configs(cfg, args, state, tf_out: dict, assets_root: str) -> render.Renderer:
+    """Phase 3: every node's service configs and the ansible inventory, from
+    cluster.toml, the providers config, the installer state and terraform's
+    outputs, written under the out dir (render.py)."""
     cfg.apply_overlay(state.load_providers())
     # The sign-in clients live in the providers overlay, not cfg.doc.
     if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
@@ -370,7 +404,12 @@ def _apply(cfg, args) -> int:
     alloc = state.allocate(cfg)
     r = render.Renderer(cfg, alloc, tf_out, state, assets_root=assets_root)
     _write_out(r.render_all(), args.out_dir)
+    return r
 
+def _converge(cfg, args, state, r, storage, assets_root: str) -> None:
+    """Phase 4: the last checks, which need the nodes (cluster.py), then
+    ansible installs the bundle and the rendered configs on every node
+    (ansible.py), then the nodes join the cluster."""
     cluster.preflight(cfg)
     check_network_mode(cfg, state)
     storage_engine.check_identity(cfg, storage, r)
@@ -402,14 +441,13 @@ def _apply(cfg, args) -> int:
     if restarted:
         log("after the restart, every node registered")
     control_carry.clear(state)
-    return _finish(cfg, args, state, r, key, storage, assets_root)
 
 def _finish(cfg, args, state, r, key, storage, assets_root: str,
             image_override=None) -> int:
-    """Every target, once every node runs the new bundle and every worker
-    registered: the bucket, the cluster id, machine specs, the license, the
-    storage switches, telemetry, templates and orgs, then the state record
-    and the DNS delegation."""
+    """Phase 5, on every target, once every node runs the new bundle and every
+    worker registered: the bucket, the cluster id, machine specs, the license,
+    the storage switches, telemetry, templates and orgs (all boxd-ctl, through
+    cluster.py), then the state record and the DNS delegation."""
     # Before any switch: a worker that can't open its bucket fails the apply.
     storage_engine.wait_bucket_open(cfg)
 
@@ -462,12 +500,26 @@ def _finish(cfg, args, state, r, key, storage, assets_root: str,
     return 0
 
 def _apply_gke(cfg, args) -> int:
-    """apply on GKE ([gke]): terraform/gke for the cloud side, then the
-    Kubernetes objects (kube.deploy), then the same post-install steps as on
-    instances. An upgrade is an apply with a new assets_version: control,
+    """apply on GKE ([gke]), in the same five phases: terraform/gke for the
+    cloud side, and the converge is Kubernetes objects (kube.deploy), not
+    ansible. An upgrade is an apply with a new assets_version: control,
     console and the edges roll; workers are updated in place."""
-    from . import kube, kube_render
     from .clouds import gke
+    _phase("preflight", "checks, before anything changes")
+    state, key, facts, assets_root, storage = _gke_preflight(cfg, args)
+    _phase("infrastructure", "terraform")
+    tf_out = _gke_infrastructure(cfg, args, state, facts)
+    _phase("render", "the cluster's config")
+    r = _gke_render(cfg, state, tf_out, assets_root)
+    _phase("converge", "the Kubernetes objects, then the pods join the cluster")
+    _gke_deploy(cfg, args, state, r, storage, tf_out)
+    _phase("finish", "settings on the running cluster")
+    return _finish(cfg, args, state, r, key, storage, assets_root,
+                   image_override=lambda image: gke.computer_image(cfg.doc, image))
+
+def _gke_preflight(cfg, args):
+    """Phase 1 on GKE. Returns (state, license key path, live_checks' facts,
+    assets root, storage guard)."""
     key = license.key_path(cfg)
     state = State(args.state_dir)
     facts = _gke_checks(cfg, state)
@@ -479,13 +531,23 @@ def _apply_gke(cfg, args) -> int:
     check_storage_bundle(cfg, assets_root)
     # The guard asks a cluster that exists through the previous apply's outputs.
     storage = storage_engine.check_guard(cfg, state, assets_root)
+    return state, key, facts, assets_root, storage
 
+def _gke_infrastructure(cfg, args, state, facts: dict) -> dict:
+    """Phase 2 on GKE: terraform/gke makes (or adopts) the GKE cluster, its
+    node pools and the buckets. Returns its outputs, with kubectl connected."""
+    from . import kube
     plan = _plan_gke(cfg, state, args.out_dir, facts)
     tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
     tf_out = tf.read_outputs(cfg, state)
     cluster.set_tf_outputs(tf_out)
     kube.connect(cfg, tf_out)
+    return tf_out
 
+def _gke_render(cfg, state, tf_out: dict, assets_root: str):
+    """Phase 3 on GKE: the renderer of the boxd-config Secret and every
+    Kubernetes object (kube_render.py); kube.deploy applies them."""
+    from . import kube, kube_render
     cfg.apply_overlay(state.load_providers())
     if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
                                       if cfg.table(t)}):
@@ -494,15 +556,19 @@ def _apply_gke(cfg, args) -> int:
     ensure_egress_ca(cfg, state)
     storage_engine.adopt_prefix(cfg, state)
     alloc = state.allocate(cfg)
-    r = kube_render.KubeRenderer(cfg, alloc, tf_out, state, assets_root=assets_root,
-                                 pull_config=kube.pull_config(cfg))
+    return kube_render.KubeRenderer(cfg, alloc, tf_out, state, assets_root=assets_root,
+                                    pull_config=kube.pull_config(cfg))
+
+def _gke_deploy(cfg, args, state, r, storage, tf_out: dict) -> None:
+    """Phase 4 on GKE: the Kubernetes objects, in order, until every pod runs
+    the new bundle and every worker registered (kube.py)."""
+    from . import kube
+    from .clouds import gke
     storage_engine.check_identity(cfg, storage, r)
     if state.data.get("applied_assets") and bundle_changes(state, cfg):
         cluster.pause_machine_specs(cfg)
     kube.deploy(cfg, r, state, args.out_dir, tf_out)
     gke.record(cfg, state)
-    return _finish(cfg, args, state, r, key, storage, assets_root,
-                   image_override=lambda image: gke.computer_image(cfg.doc, image))
 
 def check_storage_bundle(cfg, assets_root: str) -> None:
     """[storage_engine] needs a bundle built with the storage engine (its
