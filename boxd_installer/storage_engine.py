@@ -12,7 +12,7 @@ which bucket and prefix the workers use."""
 import datetime
 import time
 
-from . import ansible, assets, config, tf
+from . import assets, cluster, config, tf
 from .util import InstallError, log
 
 # boxd-ctl's refusals while the cluster catches up: a control node that
@@ -53,7 +53,7 @@ def parse_catalog(out: str) -> str | None:
 def catalog_state(cfg) -> str | None:
     """The live storage catalog switch: "on", "off" (also for a boxd-ctl
     without the command), or None when control gave no answer."""
-    res = ansible.ctl(cfg, "cluster storage-catalog", check=False, quiet=True)
+    res = cluster.ctl(cfg, "cluster storage-catalog", check=False, quiet=True)
     err = (res.stderr or "") + (res.stdout or "")
     if res.returncode != 0:
         return "off" if "unrecognized subcommand" in err else None
@@ -67,7 +67,7 @@ def _live_catalog_before_terraform(cfg, state) -> str | None:
     if not state.data.get("applied_assets"):
         return None
     try:
-        ansible.set_tf_outputs(tf.cached_outputs(state))
+        cluster.set_tf_outputs(tf.cached_outputs(state))
     except InstallError:
         return None
     try:
@@ -130,7 +130,7 @@ def adopt_prefix(cfg, state) -> None:
         return
     if not state.data.get("applied_assets"):
         return
-    for name, ident in ansible.deployed_bucket_identities(cfg).items():
+    for name, ident in cluster.deployed_bucket_identities(cfg).items():
         if ident.get("prefix"):
             state.data["storage_prefix"] = ident["prefix"]
             state.save()
@@ -150,7 +150,7 @@ def check_identity(cfg, ctx: Context, renderer) -> None:
                 raise _moved(k, ctx.guard.get(k, ""), new.get(k, ""))
     if not ctx.engaged:
         return
-    for name, old in ansible.deployed_bucket_identities(cfg).items():
+    for name, old in cluster.deployed_bucket_identities(cfg).items():
         for k in ("kind", "bucket", "endpoint", "prefix"):
             if old.get(k, "") != new.get(k, ""):
                 raise InstallError(f"{name} runs the storage engine on {old.get('bucket')} "
@@ -171,7 +171,7 @@ def wait_bucket_open(cfg, timeout: int = BUCKET_OPEN_TIMEOUT) -> None:
     for node in cfg.nodes_with("worker"):
         deadline = time.time() + timeout
         while True:
-            line = ansible.worker_bucket_line(cfg, node)
+            line = cluster.worker_bucket_line(cfg, node)
             if OPEN_LINE in line:
                 log(f"{node.name}: the storage engine's bucket is open")
                 break
@@ -192,7 +192,7 @@ def _ctl(cfg, command: str, timeout: int = SWITCH_TIMEOUT) -> str:
     """boxd-ctl, retried while the refusal says the cluster is catching up."""
     deadline = time.time() + timeout
     while True:
-        res = ansible.ctl(cfg, command, check=False)
+        res = cluster.ctl(cfg, command, check=False)
         if res.returncode == 0:
             return res.stdout or ""
         err = ((res.stderr or "") + (res.stdout or "")).strip()

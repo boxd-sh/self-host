@@ -8,24 +8,16 @@ import shlex
 import shutil as _shutil
 import subprocess
 
-from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
-               oidc, private_services, remote_state, render, storage_engine, telemetry, tf,
-               windows, windows_image)
-from .state import Allocation, State, generate_egress_ca
+from . import (apply, assets, clouds, cluster, config, control_carry, license, local_ca, oidc,
+               remote_state, render, storage_engine, telemetry, tf, windows, windows_image)
+from .state import State
 from .util import InstallError, log
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # `state pull` lands here by default: inside the checkout, so it survives
 # ./boxd-install's throwaway container; gitignored; holds decrypted secrets.
 PULLED_STATE = os.path.join(ROOT, "pulled-state")
-
-def _write_out(files: dict[str, str], out_dir: str) -> None:
-    for rel, content in sorted(files.items()):
-        path = os.path.join(out_dir, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
-            fh.write(content)
-    log(f"wrote {len(files)} files under {out_dir}/")
 
 def _renderer(cfg, state, fake_tf: str | None) -> render.Renderer:
     cfg.apply_overlay(state.load_providers())
@@ -64,7 +56,7 @@ def cmd_validate(args) -> int:
     cfg = config.load(args.cluster)
     if clouds.kubernetes(cfg):
         return _validate_gke(cfg)
-    check_existing_vpc(cfg)
+    apply.check_existing_vpc(cfg)
     # A warning, not an error: renaming a node replaces its instance, so a
     # running cluster keeps the names it has.
     if odd := [n.name for n in cfg.nodes if not n.name.startswith(f"{cfg.name}-")]:
@@ -85,13 +77,6 @@ def cmd_validate(args) -> int:
     if "oidc" in cfg.doc:
         print(oidc.check_discovery(cfg.doc["oidc"]))
     return 0
-
-def check_existing_vpc(cfg) -> None:
-    """[aws] vpc_id: the routes, DNS and S3 endpoint the nodes need (validate
-    and apply only, not every command that loads cluster.toml)."""
-    if cfg.cloud_name == "aws" and "vpc_id" in cfg.cloud:
-        if errs := clouds.CLOUDS["aws"].network_errors(cfg.cloud):
-            raise InstallError("the existing VPC can't take the cluster:\n  " + "\n  ".join(errs))
 
 def _validate_gke(cfg) -> int:
     """[gke]: the file, the worker pool against the license, and what can
@@ -114,410 +99,20 @@ def cmd_render(args) -> int:
     cfg = config.load(args.cluster)
     if args.fake_tf:
         state = State(args.state_dir)
-        _write_out(_render_files(cfg, state, args.fake_tf), args.out_dir)
+        apply.write_out(_render_files(cfg, state, args.fake_tf), args.out_dir)
         return 0
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
         state = State(args.state_dir)
-        _write_out(_render_files(cfg, state, None), args.out_dir)
+        apply.write_out(_render_files(cfg, state, None), args.out_dir)
     return 0
 
-def _checkpoint(cfg, args) -> None:
-    """Push the state before terraform creates anything from it: the values made for this
-    cluster on its first apply (the KMS key ring's suffix, keys, the egress CA) must be in
-    the state bucket before resources carry them, or a run cut short makes them anew on the
-    next apply and terraform replaces what the first one created."""
-    remote_state.push(cfg, args.state_dir, delete_local=False)
+def cmd_plan(args) -> int:
+    return apply.plan(config.load(args.cluster), args)
 
 def cmd_apply(args) -> int:
     cfg = config.load(args.cluster)
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
-        if clouds.kubernetes(cfg):
-            return _apply_gke(cfg, args)
-        return _apply(cfg, args)
-
-def _removal_steps(role: str, node_id: int) -> list[str]:
-    """What taking one Raft member out does to the cluster, and what must be
-    run before the apply that drops it (check_removed_members)."""
-    if role == "worker":
-        wid = f"worker-{node_id}"
-        return [f"worker {wid}: every machine on it goes with it. Move them off and retire it "
-                "first:",
-                f"    boxd-ctl node drain {wid}",
-                f"    boxd-ctl node mark-dead {wid}",
-                f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
-    if role == "proxy":
-        return [f"proxy proxy-{node_id}: every machine placed on it resolves to it and has its "
-                "SSH port there. boxd can't move machines to another proxy yet, so they become "
-                "unreachable, and new machines keep landing on it. There is no procedure for "
-                "this yet: put the node back and ask boxd."]
-    if role == "dns":
-        return ["nameserver: it is in your zone's delegation. Take its NS record and its glue "
-                "(A) record out at your DNS provider and wait out their TTL first, then:",
-                f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
-    return [f"control (Raft voter {node_id}): if the voters left lose their quorum, the whole "
-            "cluster stops. Ask boxd first; the voter leaves with:",
-            f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
-
-def check_removed_members(state, cfg, ask=None,
-                          auto_approve: bool = False) -> dict[str, dict[str, int]]:
-    """An apply whose cluster.toml has dropped a Raft member (a node, or one
-    of its roles) takes it out of the cluster, and on a cloud terraform
-    deletes its instance. Nothing in the cluster forgets it on its own, so
-    say what that breaks and what to run first, and go on only on a yes.
-    Returns what was confirmed, for retire_removed. `ask` is the prompt
-    (input() at a terminal); without a terminal the apply stops, unless
-    --auto-approve answered yes up front (the warning still goes to the log)."""
-    removed = state.removed_members(cfg)
-    if not removed:
-        return {}
-    lines = ["cluster.toml no longer lists these nodes (or roles), so this apply takes them "
-             "out of the cluster" + (", and terraform deletes their instances"
-                                     if clouds.provisions(cfg) else "") + ".",
-             "Until the steps below are done, that leaves the cluster unusable:"]
-    for name, roles in removed.items():
-        lines.append(f"  {name}")
-        lines += [f"    {line}" for role, node_id in roles.items()
-                  for line in _removal_steps(role, node_id)]
-    lines += ["Run boxd-ctl on a control node; remove-peer only on the leader, which "
-              "`boxd-ctl status` names (OPERATIONS.md, \"Getting started\").",
-              "Not removing them? Put them back in cluster.toml with the same name, roles and "
-              "internal_ip."]
-    warning = "\n".join(lines)
-    if auto_approve:
-        print(f"warning: {warning}\n--auto-approve: taking them out", file=sys.stderr)
-        return removed
-    if ask is None:
-        if not sys.stdin.isatty():
-            raise InstallError(warning + "\nThis apply needs a yes at a terminal, or "
-                               "--auto-approve; nothing was changed.")
-        ask = input
-    print(f"warning: {warning}", file=sys.stderr)
-    answer = ask("Have you run these steps, and should this apply take them out? [y/N] ")
-    if answer.strip().lower() not in ("y", "yes"):
-        raise InstallError("apply stopped; nothing was changed")
-    return removed
-
-def retire_removed(state, removals: dict[str, dict[str, int]]) -> None:
-    """Forget the ids of the nodes the apply took out, for good: the next
-    apply doesn't ask about them again, and no node gets their ids."""
-    for name, roles in removals.items():
-        for role in roles:
-            if (node_id := state.retire_node_id(f"{name}/{role}")) is not None:
-                log(f"{name} ({role}) removed; node id {node_id} retired")
-
-def _apply(cfg, args) -> int:
-    # Before anything else: a [license].key_file that is missing or not a
-    # key stops the apply; it never falls back to the free tier.
-    key = license.key_path(cfg)
-    if errs := telemetry.errors(cfg) + windows.errors(cfg):
-        raise InstallError("; ".join(errs))
-    check_existing_vpc(cfg)
-    state = State(args.state_dir)
-    # Before terraform, which would delete a dropped node's instance.
-    removals = check_removed_members(state, cfg, auto_approve=args.auto_approve)
-    # The render would refuse a half-configured [oidc] only after terraform.
-    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
-    if oidc_table and (why := render.oidc_render_error(oidc_table)):
-        raise InstallError(why)
-    state.ensure_keypairs()
-    ansible.set_keys_dir(state.keys_dir)
-    os.makedirs(args.out_dir, exist_ok=True)
-    if not clouds.provisions(cfg):
-        # Terraform puts the deploy key on cloud instances; on metal the
-        # operator does, so this stops a first apply until they have.
-        ansible.check_hosts(cfg, state.deploy_pubkey())
-
-    assets_root = assets.ensure(cfg, args.cache_dir, state)
-    check_storage_bundle(cfg, assets_root)
-    check_relay_bundle(cfg, assets_root)
-    windows.check_bundle(cfg, assets_root)
-    check_private_service_bridges(cfg, state)
-    # Before terraform: once the storage catalog is on, the engine and its
-    # bucket are one-way (storage_engine.check_guard).
-    storage = storage_engine.check_guard(cfg, state, assets_root)
-    assets.console_tarball(assets_root)
-
-    # metal: the hosts exist, so there is nothing to plan or replace.
-    if clouds.provisions(cfg):
-        tf.init(cfg)
-        # A worker that exists keeps its type: the license never resizes one.
-        existing = tf.instance_types(cfg)
-        # A cluster that exists stays in the kind of VPC it has.
-        if cfg.cloud_name == "aws":
-            clouds.CLOUDS["aws"].check_network_switch(cfg, *tf.network(cfg))
-        # A worker that exists keeps its kind of data disk (EBS or instance store).
-        if cfg.cloud_name == "aws" and any(n.name in existing for n in cfg.nodes_with("worker")):
-            clouds.CLOUDS["aws"].check_data_disk_switch(cfg, set(existing), tf.data_volumes(cfg))
-        for warning in license.free_tier_warnings(cfg, existing):
-            log(f"warning: {warning}")
-        tfvars = tf.write_tfvars(cfg, state, args.out_dir, existing)
-        plan = os.path.join(args.out_dir, "tf.plan")
-        tf.plan(cfg, tfvars, plan)
-        # Before the apply: a replaced control node takes its state with it.
-        control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
-        tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
-    # The removed nodes' instances are gone now (on metal, out of the config).
-    retire_removed(state, removals)
-    tf_out = tf.read_outputs(cfg, state)
-    ansible.set_tf_outputs(tf_out)
-
-    cfg.apply_overlay(state.load_providers())
-    # The sign-in clients live in the providers overlay, not cfg.doc.
-    if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
-                                      if cfg.table(t)}):
-        log(f"warning: {inert}")
-    for warning in (config.network_warnings(cfg) + config.data_disk_warnings(cfg)
-                    + config.storage_bucket_warnings(cfg) + windows.registry_warnings(cfg)):
-        log(f"warning: {warning}")
-    composio.sync_auth_configs(cfg, state, assets_root)
-    ensure_egress_ca(cfg, state)
-    storage_engine.adopt_prefix(cfg, state)
-    alloc = state.allocate(cfg)
-    r = render.Renderer(cfg, alloc, tf_out, state, assets_root=assets_root)
-    _write_out(r.render_all(), args.out_dir)
-
-    ansible.preflight(cfg)
-    check_network_mode(cfg, state)
-    storage_engine.check_identity(cfg, storage, r)
-    if not clouds.provisions(cfg):
-        for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
-            log(f"warning: {warning}")
-    # Last before the converge, so a check that refuses the apply leaves them on.
-    if bundle_changes(state, cfg):
-        ansible.pause_machine_specs(cfg)
-    ansible.converge(cfg, args.out_dir, assets_root,
-                     assets.host_kernel_release(assets_root),
-                     control_carry.carry_dir(state))
-
-    ansible.wait_for_leader(cfg)
-    # A node added to cluster.toml joins a running cluster only through the
-    # leader's sync-config (a no-op on a fresh cluster and on a re-apply).
-    ansible.sync_config(cfg)
-    expected = len(cfg.nodes_with("worker"))
-    gave_up = ansible.learners_gave_up(cfg)
-    restarted = gave_up or (ansible._registered_nodes(cfg) or 0) < expected
-    if restarted:
-        if gave_up:
-            # Expected on a fresh cluster: they started before the raft
-            # leader existed. The restart below fixes it.
-            log(f"restarting services that gave up registering (they started before "
-                f"the raft leader): {', '.join(gave_up)}")
-        ansible.restart_learners(cfg)
-    ansible.verify_registration(cfg, expected=expected)
-    if restarted:
-        log("after the restart, every node registered")
-    control_carry.clear(state)
-    return _finish(cfg, args, state, r, key, storage, assets_root)
-
-def _finish(cfg, args, state, r, key, storage, assets_root: str,
-            image_override=None) -> int:
-    """Every target, once every node runs the new bundle and every worker
-    registered: the bucket, the cluster id, machine specs, the license, the
-    storage switches, telemetry, templates and orgs, then the state record
-    and the DNS delegation."""
-    # Before any switch: a worker that can't open its bucket fails the apply.
-    storage_engine.wait_bucket_open(cfg)
-
-    # Every node (control, proxy, console) runs the new bundle now, so the
-    # cluster ID can be made (once; a no-op after). Before the key: a bound
-    # key needs it.
-    ansible.init_cluster_id(cfg)
-    # For the same reason: an older node would skip their entries for good.
-    ansible.turn_on_machine_specs(cfg)
-    # Before the templates, so the key is in place before any machine is made.
-    if key:
-        ansible.install_license(cfg, key)
-    # After the key: a bucket default needs its bucket-storage feature. The
-    # guard is pushed to the state bucket the moment the catalog is on.
-    storage_engine.set_switches(
-        cfg, state, storage, r,
-        push=lambda: remote_state.push(cfg, args.state_dir, delete_local=False))
-    value, source = telemetry.setting(cfg)
-    if value is None:
-        log("telemetry: [telemetry] enabled is not set; the cluster's setting is left as it is")
-    else:
-        ansible.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
-    # Every worker runs the new release and has the firmware now ([windows]).
-    windows.configure(cfg, r.alloc)
-
-    image, tag = assets.computer_image(assets_root)
-    if image_override:
-        image = image_override(image)
-    ansible.seed_templates(cfg, image, tag, cfg.assets_version,
-                           storage=storage_engine.template_storage(cfg))
-    ansible.configure_orgs(cfg, cfg.machine_sizes())
-
-    # The exact bundle this cluster now runs — with a channel, the only
-    # record of what to pin to come back here (docs/REFERENCE.md "Upgrades and rollback").
-    state.data["applied_assets"] = {"sha": cfg.assets_version, "channel": cfg.assets_channel}
-    state.data["network_mode"] = cfg.network_mode
-    state.save()
-
-    print()
-    print(render.glue_records(cfg, r))
-    after = "the forwarder is in place" if cfg.ingress == "private" else "glue records propagate"
-    print(f"\nConsole: https://app.{cfg.zone}  (after {after})")
-    print(f"Assets: {cfg.assets_version}" + (f" (channel {cfg.assets_channel})" if cfg.assets_channel else ""))
-    if cfg.acme_ca == "gts" and ansible.acme_eab_spent(cfg):
-        raise InstallError(
-            "boxd-control can't register its ACME account: Google Trust Services says the "
-            "EAB key was already used, so no certificate will ever be issued. Mint a new "
-            "key and re-apply (docs/REFERENCE.md, Troubleshooting, \"Unknown external account binding\"):\n"
-            "  ./boxd-install state reset-eab\n  ./boxd-install apply")
-    return 0
-
-def _apply_gke(cfg, args) -> int:
-    """apply on GKE ([gke]): terraform/gke for the cloud side, then the
-    Kubernetes objects (kube.deploy), then the same post-install steps as on
-    instances. An upgrade is an apply with a new assets_version: control,
-    console and the edges roll; workers are updated in place."""
-    from . import kube, kube_render
-    from .clouds import gke
-    key = license.key_path(cfg)
-    if errs := telemetry.errors(cfg) + gke.license_errors(cfg):
-        raise InstallError("; ".join(errs))
-    state = State(args.state_dir)
-    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
-    if oidc_table and (why := render.oidc_render_error(oidc_table)):
-        raise InstallError(why)
-    errs, warns, facts = gke.live_checks(cfg)
-    errs += gke.state_errors(cfg, state)
-    for warning in gke.warnings(cfg) + warns:
-        log(f"warning: {warning}")
-    if errs:
-        raise InstallError("\n  ".join(["this apply can't go on:"] + errs))
-    state.ensure_keypairs()
-    ansible.set_keys_dir(state.keys_dir)
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    assets_root = assets.ensure(cfg, args.cache_dir, state)
-    check_storage_bundle(cfg, assets_root)
-    # The guard asks a cluster that exists through the previous apply's outputs.
-    storage = storage_engine.check_guard(cfg, state, assets_root)
-
-    tf.init(cfg)
-    # The pool never shrinks under a running worker: kube.deploy drains and
-    # removes workers (and their nodes) itself.
-    live = kube.live_worker_replicas(cfg, state)
-    tfvars = gke.write_tfvars(cfg, state, args.out_dir, live, facts)
-    plan = os.path.join(args.out_dir, "tf.plan")
-    tf.plan(cfg, tfvars, plan)
-    # Every plan, the first included: a state that was lost looks like a first apply, and its
-    # plan is the one that would replace what the cluster already has.
-    import json
-    if problems := gke.plan_problems(json.loads(tf.show_json(cfg, plan))):
-        raise InstallError("\n  ".join(["refusing the terraform plan:"] + problems))
-    tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
-    tf_out = tf.read_outputs(cfg, state)
-    ansible.set_tf_outputs(tf_out)
-    kube.connect(cfg, tf_out)
-
-    cfg.apply_overlay(state.load_providers())
-    if inert := config.inert_sign_in({t: cfg.table(t) for t in ("oidc", "google", "github")
-                                      if cfg.table(t)}):
-        log(f"warning: {inert}")
-    composio.sync_auth_configs(cfg, state, assets_root)
-    ensure_egress_ca(cfg, state)
-    storage_engine.adopt_prefix(cfg, state)
-    alloc = state.allocate(cfg)
-    r = kube_render.KubeRenderer(cfg, alloc, tf_out, state, assets_root=assets_root,
-                                 pull_config=kube.pull_config(cfg))
-    storage_engine.check_identity(cfg, storage, r)
-    if state.data.get("applied_assets") and bundle_changes(state, cfg):
-        ansible.pause_machine_specs(cfg)
-    kube.deploy(cfg, r, state, args.out_dir, tf_out)
-    gke.record(cfg, state)
-    return _finish(cfg, args, state, r, key, storage, assets_root,
-                   image_override=lambda image: gke.computer_image(cfg.doc, image))
-
-def check_storage_bundle(cfg, assets_root: str) -> None:
-    """[storage_engine] needs a bundle built with the storage engine (its
-    manifest's features list "bucket"). Fail closed: a bundle that doesn't say
-    so is refused, every bundle from before the field included, so a cluster
-    meant to keep machines in a bucket never starts on file-only workers."""
-    if "storage_engine" not in cfg.doc:
-        return
-    if "bucket" not in assets.features(assets_root):
-        raise InstallError(
-            f"[storage_engine] needs a release with bucket storage, and {cfg.assets_version[:12]} "
-            "is one without it (its manifest lists no \"bucket\" feature). Bucket storage "
-            "comes with a license key that includes it: ask your boxd contact, or remove "
-            "[storage_engine]")
-
-def check_relay_bundle(cfg, assets_root: str) -> None:
-    """[[worker.private_services]] needs a bundle that ships the relay (bin/boxd-relay).
-    Fail closed: an older bundle's worker would ignore the tables without a word, and boxes
-    would get no answer for the names."""
-    if not private_services.declared(cfg.doc):
-        return
-    if not assets.has_file(assets_root, "bin/boxd-relay"):
-        raise InstallError(
-            f"[[worker.private_services]] needs a release with the relay for private services, "
-            f"and {cfg.assets_version[:12]} is one without it (its manifest lists no "
-            "bin/boxd-relay): set [cluster].assets_version to a newer release, or remove the "
-            "[[worker.private_services]] tables")
-
-def check_private_service_bridges(cfg, state) -> None:
-    """Before terraform: no private service target inside a worker's bridge /16, the /16s this
-    apply gives new workers included. Found only at render, a new worker's instance would exist
-    and its index be saved, and every later apply would stop there."""
-    declared = private_services.declared(cfg.doc)
-    if not declared or cfg.network_mode == "routed":
-        return
-    alloc = Allocation(cfg, {}, {}, state.bridge_indexes_for(cfg))
-    subnets = {w: alloc.bridge_subnet(w) for w in alloc.bridge_indexes}
-    if why := private_services.bridge_overlap_error(declared, subnets):
-        raise InstallError(why)
-
-def bundle_changes(state, cfg) -> bool:
-    """Whether this apply installs another bundle than the last successful
-    one. The record is written only at the end of an apply, so an upgrade
-    that stopped half-way still counts as a change on the re-run."""
-    return (state.data.get("applied_assets") or {}).get("sha") != cfg.assets_version
-
-def check_network_mode(cfg, state) -> None:
-    """Refuse to switch an existing cluster's [network] mode (bridge <->
-    routed) while it has machines: each one's captured RAM (snapshots,
-    hibernation, templates' copies) holds its old gateway and address, which
-    the other mode doesn't route. The deployed workers' configs say what the
-    cluster runs (a cluster switched by hand counts as switched); the state's
-    record covers a cluster whose workers were all replaced."""
-    if not state.data.get("applied_assets"):
-        return
-    want = cfg.network_mode
-    deployed = ansible.deployed_network_modes(cfg)
-    differ = sorted(n for n, mode in deployed.items() if mode != want)
-    recorded = state.data.get("network_mode")
-    if not differ and (deployed or recorded in (None, want)):
-        return
-    count = ansible.machine_count(cfg)
-    where = ", ".join(differ) if differ else "the cluster (installer state)"
-    if count:
-        raise InstallError(
-            f'[network] mode = "{want}", but {where} runs the other mode, and the cluster has '
-            f"{count} machine(s). Machines keep their old network in their saved memory, so the "
-            "mode only changes on a cluster without machines: remove them (`boxd-ctl vm list`), "
-            "or put mode back")
-    log(f'network: switching {where} to mode = "{want}" (no machines on the cluster)')
-
-def ensure_egress_ca(cfg, state) -> None:
-    """One egress CA for the cluster, in state, before the render ships it to
-    every worker. A cluster applied before this release has none in state but
-    workers that made their own: adopt the first one found, so its machines
-    keep trusting it. Otherwise make one."""
-    if state.egress_ca() is not None or not cfg.nodes_with("worker"):
-        return
-    found = ansible.worker_egress_ca(cfg) if state.data.get("applied_assets") else None
-    if found:
-        name, cert, key = found
-        state.store_egress_ca(cert, key)
-        others = [n.name for n in cfg.nodes_with("worker") if n.name != name]
-        log(f"egress CA: adopted {name}'s own pair for the whole cluster"
-            + (f"; machines on {', '.join(others)} get it at their next boot, restore or "
-               "fork (until then their HTTPS through the egress proxy fails)" if others else ""))
-    else:
-        state.store_egress_ca(*generate_egress_ca())
-        log("egress CA: made one for the cluster")
+        return apply.run(cfg, args)
 
 def cmd_destroy(args) -> int:
     cfg = config.load(args.cluster)
@@ -591,9 +186,9 @@ def cmd_ctl(args) -> int:
     data = None if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
         state = State(args.state_dir)
-        ansible.set_keys_dir(state.keys_dir)
-        ansible.set_tf_outputs(tf.cached_outputs(state))
-        res = ansible.ctl(cfg, shlex.join(argv), check=False, quiet=True, input=data or None)
+        cluster.set_keys_dir(state.keys_dir)
+        cluster.set_tf_outputs(tf.cached_outputs(state))
+        res = cluster.ctl(cfg, shlex.join(argv), check=False, quiet=True, input=data or None)
     sys.stdout.write(res.stdout or "")
     sys.stderr.write(res.stderr or "")
     return res.returncode
@@ -882,12 +477,14 @@ def main() -> int:
     p.add_argument("--cluster", default=os.path.join(ROOT, "cluster.toml"))
     p.add_argument("--state-dir", help="default: a fresh random dir under /tmp")
     p.add_argument("--out-dir", help="default: a fresh random dir under /tmp; "
-                   "apply/destroy delete it when done (rendered configs carry secrets)")
+                   "apply, plan and destroy delete it when done (rendered configs carry secrets)")
     p.add_argument("--cache-dir", default=os.path.join(ROOT, "cache"))
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate")
     pr = sub.add_parser("render")
     pr.add_argument("--fake-tf", help="JSON file standing in for terraform outputs")
+    sub.add_parser("plan", help="what the next apply's terraform would change (GCP, AWS, "
+                                "GKE); changes nothing")
     pa = sub.add_parser("apply")
     pa.add_argument("-y", "--auto-approve", action="store_true",
                     help="don't ask before taking out nodes that cluster.toml no longer lists "
@@ -962,7 +559,7 @@ Changes take effect on the next `apply`.""")
         args.out_dir = tempfile.mkdtemp(prefix="boxd-installer-out-")
         tmp_out = True
     try:
-        rc = {"validate": cmd_validate, "render": cmd_render,
+        rc = {"validate": cmd_validate, "render": cmd_render, "plan": cmd_plan,
               "apply": cmd_apply, "destroy": cmd_destroy, "ctl": cmd_ctl,
               "state": cmd_state, "providers": cmd_providers,
               "windows-image": cmd_windows_image}[args.cmd](args)

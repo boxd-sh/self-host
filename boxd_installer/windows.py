@@ -27,7 +27,7 @@ import os
 import re
 import shlex
 
-from . import ansible, assets, license
+from . import assets, cluster, license
 from .util import InstallError, log
 
 KEYS = {"image", "kms", "licensing", "hosts", "copies"}
@@ -308,7 +308,7 @@ def configure(cfg, alloc) -> None:
 
 
 def _ctl(cfg, command: str) -> None:
-    res = ansible.ctl(cfg, command, check=False)
+    res = cluster.ctl(cfg, command, check=False)
     if res.returncode != 0:
         raise InstallError(f"boxd-ctl {command} failed: {_err(res)}")
 

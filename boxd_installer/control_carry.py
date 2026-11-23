@@ -19,7 +19,7 @@ import json
 import os
 import subprocess
 
-from . import ansible, tf
+from . import cluster, tf
 from .util import InstallError, log
 
 DIR = "control-carry"
@@ -52,15 +52,15 @@ def save(cfg, state, plan: dict) -> None:
     log(f"plan replaces control node(s) {', '.join(names)}: carrying their state over")
     # SSH targets come from the outputs of the previous apply: the instances
     # being replaced are the ones in it.
-    ansible.set_tf_outputs(tf.cached_outputs(state))
+    cluster.set_tf_outputs(tf.cached_outputs(state))
     os.makedirs(carry_dir(state), mode=0o700, exist_ok=True)
     for name in names:
         _save_one(cfg, state, control[name])
 
 def _save_one(cfg, state, node) -> None:
     dest = archive_path(state, node.name)
-    target = ansible._target(cfg, node)
-    probe = subprocess.run(["ssh", *ansible._ssh_opts(cfg), target,
+    target = cluster._target(cfg, node)
+    probe = subprocess.run(["ssh", *cluster._ssh_opts(cfg), target,
                             f"sudo test -f {REMOTE_DIR}/state.db"], capture_output=True)
     if probe.returncode != 0:
         # A rerun after terraform already destroyed the old instance: the
@@ -78,7 +78,7 @@ def _save_one(cfg, state, node) -> None:
     tmp = dest + ".part"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
-        res = subprocess.run(["ssh", *ansible._ssh_opts(cfg), target,
+        res = subprocess.run(["ssh", *cluster._ssh_opts(cfg), target,
                               f"sudo systemctl stop boxd-control && "
                               f"sudo tar -C {REMOTE_DIR} -czf - ."],
                              stdout=fh, stderr=subprocess.PIPE)

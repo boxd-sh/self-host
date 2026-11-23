@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, control_carry
+from boxd_installer import cluster, config, control_carry
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -52,7 +52,7 @@ class Save(unittest.TestCase):
         with open(os.path.join(self.tmp, "tf-outputs.json"), "w") as fh:
             json.dump({"nodes": {self.control: {"instance_id": "i-control"},
                                  worker: {"instance_id": "i-worker"}}}, fh)
-        ansible.set_keys_dir(self.state.keys_dir)
+        cluster.set_keys_dir(self.state.keys_dir)
         self.dest = control_carry.archive_path(self.state, self.control)
 
     def plan(self, *names):

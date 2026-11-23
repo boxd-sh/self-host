@@ -12,7 +12,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, kube, kube_render, main
+from boxd_installer import cluster, config, kube, kube_render, main
 from boxd_installer.util import InstallError
 
 from test_gke_config import gke_doc
@@ -154,7 +154,7 @@ class Transport(Base):
         self.assertEqual(self.fake.calls[-1][:2], ["exec", "boxd-control-1"])
 
     def test_stdin_goes_through(self):
-        ansible.ctl(self.cfg, "license install", check=False, input="boxd-lic1_x\n")
+        cluster.ctl(self.cfg, "license install", check=False, input="boxd-lic1_x\n")
         self.assertEqual(self.fake.calls[-1][:3], ["exec", "-i", "boxd-control-0"])
         self.assertEqual(self.fake.ctl[-1], ("boxd-control-0", ["license", "install"], "boxd-lic1_x\n"))
 
@@ -174,12 +174,12 @@ class Transport(Base):
             if args[0] == "exec" and args[-1] == "sync-config":
                 return ok("No new learners to add\n")
             return real(cfg, *args, **kw)
-        with mock.patch.object(ansible, "_ssh") as ssh, mock.patch.object(kube, "kubectl", answer), \
-                mock.patch.object(ansible, "log"):
-            self.assertEqual(ansible.leader_node(self.cfg).name, "control-0")
-            ansible.sync_config(self.cfg)
-            ansible.install_license(self.cfg, key)
-            ansible.wait_for_leader(self.cfg)
+        with mock.patch.object(cluster, "_ssh") as ssh, mock.patch.object(kube, "kubectl", answer), \
+                mock.patch.object(cluster, "log"):
+            self.assertEqual(cluster.leader_node(self.cfg).name, "control-0")
+            cluster.sync_config(self.cfg)
+            cluster.install_license(self.cfg, key)
+            cluster.wait_for_leader(self.cfg)
         ssh.assert_not_called()
 
     def test_registered_ids(self):
@@ -261,9 +261,9 @@ class Removal(Base):
             if check and res.returncode:
                 raise InstallError(res.stderr)
             return res
-        for p in (mock.patch.object(ansible, "ctl", ctl),
-                  mock.patch.object(ansible, "leader_node", return_value="leader"),
-                  mock.patch.object(ansible, "ctl_on",
+        for p in (mock.patch.object(cluster, "ctl", ctl),
+                  mock.patch.object(cluster, "leader_node", return_value="leader"),
+                  mock.patch.object(cluster, "ctl_on",
                                     lambda cfg, node, command, **kw: self.ctl_calls.append(command) or ok())):
             p.start()
             self.addCleanup(p.stop)
@@ -338,7 +338,7 @@ class InPlace(Base):
         self.spec = self.r.worker_spec_hash()
         self.fake.files[("boxd-worker-0", f"{kube_render.SRC}/worker-0.toml")] = self.files["worker-0.toml"]
         self.ctl_calls = []
-        p = mock.patch.object(ansible, "ctl", lambda cfg, c, **kw: self.ctl_calls.append(c) or ok(
+        p = mock.patch.object(cluster, "ctl", lambda cfg, c, **kw: self.ctl_calls.append(c) or ok(
             f"Peers:\n  worker-{self.r.alloc.ids['worker-0/worker']} — active\n"))
         p.start()
         self.addCleanup(p.stop)
@@ -410,7 +410,7 @@ class Probes(Base):
                                            "storage engine: the bucket is open (gcs)\ny\n")
         line = kube.worker_bucket_line(self.cfg, self.cfg.nodes_with("worker")[0])
         self.assertEqual(line, "storage engine: the bucket is open (gcs)")
-        self.assertTrue(ansible.worker_bucket_line(self.cfg, self.cfg.nodes_with("worker")[0]))
+        self.assertTrue(cluster.worker_bucket_line(self.cfg, self.cfg.nodes_with("worker")[0]))
 
     def test_wait_for_file_nudges_the_kubelet(self):
         pod, path = "boxd-control-0", "/etc/boxd-src/control-0.toml"
@@ -482,7 +482,7 @@ class Probes(Base):
         alloc = st.allocate(cfg)
         wid = f"worker-{alloc.node_id('worker-0', 'worker')}"
         answers = iter(["Peers:\n  worker-99 — active\n", f"Peers:\n  {wid} — active\n"])
-        with mock.patch.object(ansible, "ctl", lambda *a, **k: ok(next(answers))), \
+        with mock.patch.object(cluster, "ctl", lambda *a, **k: ok(next(answers))), \
                 mock.patch.object(kube, "learners_gave_up", return_value=[]):
             kube.verify_registration(cfg, alloc)
 
@@ -495,8 +495,8 @@ class Ctl(unittest.TestCase):
                 mock.patch.object(main.remote_state, "synced"), \
                 mock.patch.object(main, "State"), \
                 mock.patch.object(main.tf, "cached_outputs", return_value=TF_OUT), \
-                mock.patch.object(main.ansible, "set_keys_dir"), \
-                mock.patch.object(main.ansible, "ctl", return_value=ok("no vms\n")) as ctl, \
+                mock.patch.object(main.cluster, "set_keys_dir"), \
+                mock.patch.object(main.cluster, "ctl", return_value=ok("no vms\n")) as ctl, \
                 mock.patch.object(main.sys, "stdin", io.StringIO("")), \
                 mock.patch.object(main.sys, "stdout", io.StringIO()) as out:
             self.assertEqual(main.cmd_ctl(args), 0)

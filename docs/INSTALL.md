@@ -43,6 +43,9 @@ be pulled, it's built locally from `docker/`, once, in a few minutes.
 
 - **Every command in this guide runs through it.** Your machine needs no
   `gcloud`, `aws` or `terraform`.
+- **What the installer does with them:** terraform makes the cloud resources,
+  ansible sets up each node, and `apply` runs both in five phases. See
+  [How the installer works](ARCHITECTURE.md).
 - **What it sees:** this directory (as `/work`), `~/.config/gcloud` and
   `~/.aws`, so cloud logins persist between runs and are shared with any
   native install. A file you pass to it (e.g. `providers set FILE`) must be

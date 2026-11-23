@@ -1,5 +1,5 @@
 """The GKE target's apply: the order of kube.deploy's steps, and where
-main._apply_gke puts the checks, terraform, the deploy and the post-install
+apply._apply_gke puts the checks, terraform, the deploy and the post-install
 steps. Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import contextlib
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from boxd_installer import config, kube, main
+from boxd_installer import apply, config, kube, main
 from boxd_installer.util import InstallError
 
 from test_gke_config import gke_doc
@@ -37,7 +37,7 @@ class DeployOrder(unittest.TestCase):
                                  prune=calls.prune, verify_registration=calls.verify_registration,
                                  _sts_replicas=calls.sts, _pods=calls.pods, _wait_crd=calls.crd,
                                  clickhouse_schema=calls.clickhouse_schema), \
-                mock.patch.multiple(kube.ansible, wait_for_leader=calls.wait_for_leader,
+                mock.patch.multiple(kube.cluster, wait_for_leader=calls.wait_for_leader,
                                     sync_config=calls.sync_config):
             kube.deploy(cfg, r, r.state, "/tmp/out", TF_OUT)
         self.assertEqual(applied, ["base", "secret", "clickhouse", "control", "console", "edge-0",
@@ -73,31 +73,31 @@ class ApplyGke(unittest.TestCase):
         state.data = {"applied_assets": {"sha": "x"}} if applied else {}
         state.load_providers.return_value = {}
         state.egress_ca.return_value = ("c", "k")
-        with mock.patch.multiple(main, State=mock.Mock(return_value=state), assets=mock.DEFAULT,
+        with mock.patch.multiple(apply, State=mock.Mock(return_value=state), assets=mock.DEFAULT,
                                  composio=mock.DEFAULT, storage_engine=mock.DEFAULT,
                                  check_storage_bundle=mock.DEFAULT, log=mock.DEFAULT), \
-             mock.patch.multiple(main.clouds.gke, live_checks=mock.Mock(return_value=live),
+             mock.patch.multiple(apply.clouds.gke, live_checks=mock.Mock(return_value=live),
                                  write_tfvars=calls.write_tfvars, record=calls.record,
                                  plan_problems=mock.Mock(return_value=list(plan_problems))), \
-             mock.patch.multiple(main.tf, init=mock.DEFAULT, plan=calls.tf_plan,
+             mock.patch.multiple(apply.tf, init=mock.DEFAULT, plan=calls.tf_plan,
                                  apply_plan=calls.tf_apply, read_outputs=mock.Mock(return_value=TF_OUT),
                                  show_json=mock.Mock(return_value="{}")), \
              mock.patch.multiple(kube, connect=calls.connect, deploy=calls.deploy,
                                  live_worker_replicas=mock.Mock(return_value=2),
                                  pull_config=mock.Mock(return_value=None)), \
              mock.patch("boxd_installer.kube_render.KubeRenderer") as renderer_cls, \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT, set_tf_outputs=mock.DEFAULT,
+             mock.patch.multiple(apply.cluster, set_keys_dir=mock.DEFAULT, set_tf_outputs=mock.DEFAULT,
                                  pause_machine_specs=calls.pause, worker_egress_ca=mock.DEFAULT,
                                  init_cluster_id=calls.init_cluster_id, turn_on_machine_specs=mock.DEFAULT,
                                  install_license=mock.DEFAULT, set_telemetry=mock.DEFAULT,
                                  seed_templates=calls.seed_templates, configure_orgs=mock.DEFAULT,
                                  acme_eab_spent=mock.Mock(return_value=False)), \
-             mock.patch.object(main.render, "glue_records", return_value=""), \
+             mock.patch.object(apply.render, "glue_records", return_value=""), \
              contextlib.redirect_stdout(io.StringIO()):
-            main.assets.computer_image.return_value = ("computer", "v1")
-            main.storage_engine.template_storage.return_value = "file"
+            apply.assets.computer_image.return_value = ("computer", "v1")
+            apply.storage_engine.template_storage.return_value = "file"
             renderer_cls.return_value.alloc = mock.Mock()
-            rc = main._apply_gke(cfg, args)
+            rc = apply._apply_gke(cfg, args)
         return rc, calls
 
     def test_order(self):
@@ -171,7 +171,7 @@ class RenderGke(unittest.TestCase):
                            return_value={"kid": "k", "hmac": "h"}), \
                 mock.patch("boxd_installer.state.State.ensure_keypairs",
                            lambda st: open(os.path.join(st.keys_dir, "proxy_host_ed25519"), "w").write("k\n")), \
-                mock.patch.object(main, "log"):
+                mock.patch.object(main, "log"), mock.patch.object(apply, "log"):
             self.assertEqual(main.cmd_render(args), 0)
         with open(os.path.join(d, "out", "manifests.json")) as fh:
             kinds = {o["kind"] for o in json.load(fh)["items"]}
@@ -216,7 +216,7 @@ class RecreateWorker(unittest.TestCase):
         with mock.patch.multiple(kube, drain=drain, kubectl=kubectl, _wait=mock.Mock(),
                                  _worker_pod=mock.Mock(return_value={"metadata": {"uid": "u1"}}),
                                  _registered=mock.Mock(return_value={"worker-5"})), \
-                mock.patch.object(kube.ansible, "ctl", ctl):
+                mock.patch.object(kube.cluster, "ctl", ctl):
             try:
                 kube.recreate_worker(cfg, 0, "worker-5")
             finally:
