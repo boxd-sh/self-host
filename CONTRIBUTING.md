@@ -12,6 +12,12 @@ unclear docs.
 - `release/v1` is the line for clusters on boxd v1. A fix that v1 clusters
   need lands on `dev` first, then in a pull request against `release/v1`.
 
+## Where things are
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) says what terraform, ansible and
+the Python installer each own, the five phases of `apply`, and which file to
+read for what.
+
 ## Running the tests
 
 The tests need Python 3.12 or newer and nothing else; the ones that need

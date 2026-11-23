@@ -9,7 +9,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, render, tf
+from boxd_installer import cluster, config, render, tf
 from boxd_installer.util import InstallError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -129,9 +129,9 @@ class FakeCtl:
 class SeedTemplates(unittest.TestCase):
     def seed(self, fake: FakeCtl, templates=None):
         cfg = config.Config(aws_doc(templates))
-        with mock.patch.object(ansible, "ctl", fake), mock.patch.object(ansible.time, "sleep"), \
+        with mock.patch.object(cluster, "ctl", fake), mock.patch.object(cluster.time, "sleep"), \
                 contextlib.redirect_stderr(io.StringIO()) as log:
-            ansible.seed_templates(cfg, "computer", "v1", "abcdef0123456789")
+            cluster.seed_templates(cfg, "computer", "v1", "abcdef0123456789")
         return log.getvalue()
 
     def test_sizes_are_set_after_templates_are_ready_and_before_cleanup(self):
@@ -184,8 +184,8 @@ class ConfigureOrgs(unittest.TestCase):
             commands.append(command)
             out = {"org list": orgs, "org comp list": comped}.get(command, "")
             return subprocess.CompletedProcess(command, 0, out, "")
-        with mock.patch.object(ansible, "ctl", fake), contextlib.redirect_stderr(io.StringIO()):
-            ansible.configure_orgs(config.Config(aws_doc()), CUSTOM)
+        with mock.patch.object(cluster, "ctl", fake), contextlib.redirect_stderr(io.StringIO()):
+            cluster.configure_orgs(config.Config(aws_doc()), CUSTOM)
         return commands
 
     def test_every_org_gets_the_largest_cpu_and_memory_and_is_comped(self):
@@ -205,7 +205,7 @@ class ConfigureOrgs(unittest.TestCase):
         # A fresh cluster: boxd's own org only, which nobody signed in to make.
         orgs = ("ORG ID  NAME  SLUG  OWNER  MEMBERS  ADMINS  VMS  AUTOHIB\n"
                 "org-s  default  default-system  system  0  0  0  default\n")
-        with mock.patch.object(ansible, "log") as log:
+        with mock.patch.object(cluster, "log") as log:
             cmds = self.run_it(orgs, "No comped orgs.\n")
         self.assertIn("org comp add org-s", cmds)
         lines = [c.args[0] for c in log.call_args_list]

@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, license, main, render, tf, windows
+from boxd_installer import apply, config, license, main, render, tf, windows
 from boxd_installer.util import InstallError
 
 from test_gke_config import gke_doc
@@ -183,8 +183,12 @@ class LicenseFeature(unittest.TestCase):
 
     def test_validate_and_apply_check_it_before_terraform(self):
         self.assertIn("windows.errors(cfg)", inspect.getsource(main.cmd_validate))
-        src = inspect.getsource(main._apply)
-        self.assertLess(src.index("windows.errors(cfg)"), src.index("tf.init(cfg)"))
+        # apply: in preflight, the phase before terraform.
+        self.assertIn("windows.errors(cfg)", inspect.getsource(apply._preflight))
+        src = inspect.getsource(apply._apply)
+        self.assertLess(src.index("_preflight("), src.index("_infrastructure("))
+        plan = inspect.getsource(apply.plan)
+        self.assertLess(plan.index("windows.errors(cfg)"), plan.index("_plan_instances("))
 
 
 class ReleaseGate(unittest.TestCase):
@@ -212,8 +216,9 @@ class ReleaseGate(unittest.TestCase):
         log.assert_not_called()
 
     def test_it_runs_before_terraform(self):
-        src = inspect.getsource(main._apply)
-        self.assertLess(src.index("windows.check_bundle(cfg, assets_root)"), src.index("tf.init(cfg)"))
+        self.assertIn("windows.check_bundle(cfg, assets_root)", inspect.getsource(apply._preflight))
+        src = inspect.getsource(apply._apply)
+        self.assertLess(src.index("_preflight("), src.index("_infrastructure("))
 
     def test_the_worker_files(self):
         full = self.bundle("bin/uefi.fd", "bin/boxd-sdk.exe", "bin/boxd-run.exe")
@@ -346,7 +351,7 @@ class Configure(unittest.TestCase):
             seen.append(command)
             failed = fail_on is not None and command.startswith(fail_on)
             return mock.Mock(returncode=1 if failed else 0, stdout="", stderr="boom" if failed else "")
-        with mock.patch.object(windows.ansible, "ctl", side_effect=ctl), \
+        with mock.patch.object(windows.cluster, "ctl", side_effect=ctl), \
              mock.patch.object(windows, "log"):
             windows.configure(cfg, alloc)
         return seen
@@ -375,7 +380,7 @@ class Configure(unittest.TestCase):
             self.commands(win_doc(), fail_on="node windows-host")
 
     def test_after_the_license_and_before_the_templates(self):
-        src = inspect.getsource(main._finish)
+        src = inspect.getsource(apply._finish)
         self.assertLess(src.index("install_license"), src.index("windows.configure"))
         self.assertLess(src.index("windows.configure"), src.index("seed_templates"))
 

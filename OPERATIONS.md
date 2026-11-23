@@ -340,7 +340,10 @@ worker, proxy or nameserver node (or one of those roles), `apply` prints what
 removing it breaks and the commands to run first, with the node's ids, and
 goes on only when you answer yes (`apply --auto-approve`, or `-y`, answers
 yes up front, for a run without a terminal). After that it doesn't ask about
-the node again.
+the node again. On a cloud it asks only about nodes that still have an
+instance. A node without one has nothing to take out, so `apply` says so and
+forgets its ids: that is what happens when you `destroy` a cluster and
+install it again with fewer nodes, since the state keeps the old ids.
 
 **Pinning a user to a worker.** That user's new machines land only on the
 pinned worker:

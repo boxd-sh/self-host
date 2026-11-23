@@ -8,7 +8,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, main, render
+from boxd_installer import apply, config, render
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -170,16 +170,16 @@ class SwitchGuard(unittest.TestCase):
 
     def check(self, doc, deployed, machines=0):
         logs = []
-        with mock.patch.object(main.ansible, "deployed_network_modes", return_value=deployed), \
-                mock.patch.object(main.ansible, "machine_count", return_value=machines) as count, \
-                mock.patch.object(main, "log", side_effect=logs.append):
-            main.check_network_mode(config.Config(doc), self.state)
+        with mock.patch.object(apply.cluster, "deployed_network_modes", return_value=deployed), \
+                mock.patch.object(apply.cluster, "machine_count", return_value=machines) as count, \
+                mock.patch.object(apply, "log", side_effect=logs.append):
+            apply.check_network_mode(config.Config(doc), self.state)
         return logs, count
 
     def test_new_cluster_is_not_asked(self):
         self.state.data.pop("applied_assets")
-        with mock.patch.object(main.ansible, "deployed_network_modes") as probe:
-            main.check_network_mode(config.Config(routed_doc()), self.state)
+        with mock.patch.object(apply.cluster, "deployed_network_modes") as probe:
+            apply.check_network_mode(config.Config(routed_doc()), self.state)
         probe.assert_not_called()
 
     def test_same_mode_is_a_no_op(self):

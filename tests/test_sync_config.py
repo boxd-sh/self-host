@@ -1,11 +1,11 @@
 """A node added to an existing cluster joins raft through the leader's
-`boxd-ctl sync-config` (ansible.sync_config). Run: python3 -m unittest discover -s tests"""
+`boxd-ctl sync-config` (cluster.sync_config). Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import subprocess
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible
+from boxd_installer import cluster
 from boxd_installer.util import InstallError
 
 LEADER = "Leader: node 1 (10.70.1.10:7000) — this node\nNodes:  2\nVMs:    0\n"
@@ -35,19 +35,19 @@ def fake_ssh(outputs: dict, calls: list):
 
 class LeaderLine(unittest.TestCase):
     def test_parse(self):
-        self.assertTrue(ansible._is_leader(LEADER))
-        self.assertTrue(ansible._is_leader("Leader: node 3 — this node\n"))
-        self.assertFalse(ansible._is_leader(FOLLOWER))
-        self.assertFalse(ansible._is_leader(ELECTING))
+        self.assertTrue(cluster._is_leader(LEADER))
+        self.assertTrue(cluster._is_leader("Leader: node 3 — this node\n"))
+        self.assertFalse(cluster._is_leader(FOLLOWER))
+        self.assertFalse(cluster._is_leader(ELECTING))
         # Only the Leader line counts, not a peer list that mentions it.
-        self.assertFalse(ansible._is_leader("Leader: node 1\nPeers:\n  2 — this node\n"))
+        self.assertFalse(cluster._is_leader("Leader: node 1\nPeers:\n  2 — this node\n"))
 
 class SyncConfig(unittest.TestCase):
     def run_sync(self, outputs):
         calls = []
-        with mock.patch.object(ansible, "_ssh", fake_ssh(outputs, calls)), \
-                mock.patch.object(ansible.time, "sleep"):
-            added = ansible.sync_config(Cfg("c0", "c1", "c2"))
+        with mock.patch.object(cluster, "_ssh", fake_ssh(outputs, calls)), \
+                mock.patch.object(cluster.time, "sleep"):
+            added = cluster.sync_config(Cfg("c0", "c1", "c2"))
         return added, calls
 
     def test_runs_on_the_leader_and_reports_added(self):
@@ -73,7 +73,7 @@ class SyncConfig(unittest.TestCase):
 
     def test_no_leader_times_out(self):
         clock = iter(range(0, 10_000, 30))
-        with mock.patch.object(ansible.time, "time", lambda: next(clock)), \
+        with mock.patch.object(cluster.time, "time", lambda: next(clock)), \
                 self.assertRaisesRegex(InstallError, "no control node says it is the raft leader"):
             self.run_sync({(n, "sudo boxd-ctl status"): ELECTING for n in ("c0", "c1", "c2")})
 
