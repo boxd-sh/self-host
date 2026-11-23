@@ -2,7 +2,7 @@
 # Run the boxd installer with every tool it needs, from a Docker image — so
 # the only thing to install is Docker.
 #
-#   ./boxd-install validate | apply | providers edit | …   ./install.py <args>
+#   ./boxd-install validate | plan | apply | providers edit | …   ./install.py <args>
 #   ./boxd-install gcloud auth login --no-launch-browser     a tool in the image
 #   ./boxd-install aws sso login --use-device-code
 #   ./boxd-install kubectl -n boxd get pods                  GKE clusters (credentials: below)

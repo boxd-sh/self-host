@@ -128,6 +128,114 @@ def _checkpoint(cfg, args) -> None:
     next apply and terraform replaces what the first one created."""
     remote_state.push(cfg, args.state_dir, delete_local=False)
 
+def cmd_plan(args) -> int:
+    """What the next apply's terraform would change, changing nothing: apply's
+    checks before terraform, the tfvars it would write, and `terraform plan`
+    on them (GCP, AWS and GKE; bare metal has no terraform). The installer
+    state is read from the bucket and deleted after, never pushed back;
+    terraform state is only read. Checks that need the assets bundle are
+    apply's alone. With --out-dir, terraform.tfvars.json and tf.plan stay."""
+    cfg = config.load(args.cluster)
+    if not clouds.provisions(cfg):
+        raise InstallError("bare metal has no terraform to plan: the hosts exist. "
+                           "`./boxd-install render` writes the configs an apply installs.")
+    on_gke = clouds.kubernetes(cfg)
+    license.key_path(cfg)
+    if not on_gke:
+        if errs := telemetry.errors(cfg) + windows.errors(cfg):
+            raise InstallError("; ".join(errs))
+        check_existing_vpc(cfg)
+    remote_state.pull(cfg, args.state_dir)
+    try:
+        state = State(args.state_dir)
+        if on_gke:
+            facts = _gke_checks(cfg, state)
+        else:
+            # apply asks here; a plan only says what the apply would ask about.
+            if removed := state.removed_members(cfg):
+                log(f"warning: {_removal_warning(cfg, removed)}")
+            _check_oidc(cfg, state)
+        fresh = not os.path.exists(os.path.join(state.keys_dir, "boxd-deploy.pub"))
+        # On a fresh cluster these are thrown away with the rest of this
+        # state; apply makes the real ones.
+        state.ensure_keypairs()
+        if fresh and not on_gke:
+            log("no installer state yet (a fresh cluster): the plan's deploy SSH key is a "
+                "placeholder")
+        os.makedirs(args.out_dir, exist_ok=True)
+        if on_gke:
+            _plan_gke(cfg, state, args.out_dir, facts)
+            return 0
+        check_private_service_bridges(cfg, state)
+        plan = _plan_instances(cfg, state, args.out_dir)
+        control = {n.name for n in cfg.nodes_with("control")}
+        if replaced := [n for n in control_carry.replaced_nodes(control_carry.plan_json(cfg, plan))
+                        if n in control]:
+            log(f"note: this plan replaces control node(s) {', '.join(replaced)}; apply "
+                "carries their state over to the new instances")
+    finally:
+        _shutil.rmtree(args.state_dir, ignore_errors=True)
+    return 0
+
+def _check_oidc(cfg, state) -> None:
+    """The render would refuse a half-configured [oidc] only after terraform."""
+    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
+    if oidc_table and (why := render.oidc_render_error(oidc_table)):
+        raise InstallError(why)
+
+def _plan_instances(cfg, state, out_dir: str) -> str:
+    """terraform/<cloud> on GCP or AWS: init, the checks against what exists,
+    the tfvars, and a saved plan (its path), for apply and plan alike."""
+    tf.init(cfg)
+    # A worker that exists keeps its type: the license never resizes one.
+    existing = tf.instance_types(cfg)
+    # A cluster that exists stays in the kind of VPC it has.
+    if cfg.cloud_name == "aws":
+        clouds.CLOUDS["aws"].check_network_switch(cfg, *tf.network(cfg))
+    # A worker that exists keeps its kind of data disk (EBS or instance store).
+    if cfg.cloud_name == "aws" and any(n.name in existing for n in cfg.nodes_with("worker")):
+        clouds.CLOUDS["aws"].check_data_disk_switch(cfg, set(existing), tf.data_volumes(cfg))
+    for warning in license.free_tier_warnings(cfg, existing):
+        log(f"warning: {warning}")
+    tfvars = tf.write_tfvars(cfg, state, out_dir, existing)
+    plan = os.path.join(out_dir, "tf.plan")
+    tf.plan(cfg, tfvars, plan)
+    return plan
+
+def _gke_checks(cfg, state) -> dict:
+    """[gke], before terraform: the license and telemetry, [oidc], and what
+    the project and the state say can't change. Returns live_checks' facts."""
+    from .clouds import gke
+    if errs := telemetry.errors(cfg) + gke.license_errors(cfg):
+        raise InstallError("; ".join(errs))
+    _check_oidc(cfg, state)
+    errs, warns, facts = gke.live_checks(cfg)
+    errs += gke.state_errors(cfg, state)
+    for warning in gke.warnings(cfg) + warns:
+        log(f"warning: {warning}")
+    if errs:
+        raise InstallError("\n  ".join(["this apply can't go on:"] + errs))
+    return facts
+
+def _plan_gke(cfg, state, out_dir: str, facts: dict) -> str:
+    """terraform/gke: init, the tfvars and a saved plan (its path), refused
+    when it would replace the cluster or recreate worker nodes."""
+    import json
+    from . import kube
+    from .clouds import gke
+    tf.init(cfg)
+    # The pool never shrinks under a running worker: kube.deploy drains and
+    # removes workers (and their nodes) itself.
+    live = kube.live_worker_replicas(cfg, state)
+    tfvars = gke.write_tfvars(cfg, state, out_dir, live, facts)
+    plan = os.path.join(out_dir, "tf.plan")
+    tf.plan(cfg, tfvars, plan)
+    # Every plan, the first included: a state that was lost looks like a first apply, and its
+    # plan is the one that would replace what the cluster already has.
+    if problems := gke.plan_problems(json.loads(tf.show_json(cfg, plan))):
+        raise InstallError("\n  ".join(["refusing the terraform plan:"] + problems))
+    return plan
+
 def cmd_apply(args) -> int:
     cfg = config.load(args.cluster)
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
@@ -170,19 +278,7 @@ def check_removed_members(state, cfg, ask=None,
     removed = state.removed_members(cfg)
     if not removed:
         return {}
-    lines = ["cluster.toml no longer lists these nodes (or roles), so this apply takes them "
-             "out of the cluster" + (", and terraform deletes their instances"
-                                     if clouds.provisions(cfg) else "") + ".",
-             "Until the steps below are done, that leaves the cluster unusable:"]
-    for name, roles in removed.items():
-        lines.append(f"  {name}")
-        lines += [f"    {line}" for role, node_id in roles.items()
-                  for line in _removal_steps(role, node_id)]
-    lines += ["Run boxd-ctl on a control node; remove-peer only on the leader, which "
-              "`boxd-ctl status` names (OPERATIONS.md, \"Getting started\").",
-              "Not removing them? Put them back in cluster.toml with the same name, roles and "
-              "internal_ip."]
-    warning = "\n".join(lines)
+    warning = _removal_warning(cfg, removed)
     if auto_approve:
         print(f"warning: {warning}\n--auto-approve: taking them out", file=sys.stderr)
         return removed
@@ -196,6 +292,21 @@ def check_removed_members(state, cfg, ask=None,
     if answer.strip().lower() not in ("y", "yes"):
         raise InstallError("apply stopped; nothing was changed")
     return removed
+
+def _removal_warning(cfg, removed: dict[str, dict[str, int]]) -> str:
+    lines = ["cluster.toml no longer lists these nodes (or roles), so this apply takes them "
+             "out of the cluster" + (", and terraform deletes their instances"
+                                     if clouds.provisions(cfg) else "") + ".",
+             "Until the steps below are done, that leaves the cluster unusable:"]
+    for name, roles in removed.items():
+        lines.append(f"  {name}")
+        lines += [f"    {line}" for role, node_id in roles.items()
+                  for line in _removal_steps(role, node_id)]
+    lines += ["Run boxd-ctl on a control node; remove-peer only on the leader, which "
+              "`boxd-ctl status` names (OPERATIONS.md, \"Getting started\").",
+              "Not removing them? Put them back in cluster.toml with the same name, roles and "
+              "internal_ip."]
+    return "\n".join(lines)
 
 def retire_removed(state, removals: dict[str, dict[str, int]]) -> None:
     """Forget the ids of the nodes the apply took out, for good: the next
@@ -215,10 +326,7 @@ def _apply(cfg, args) -> int:
     state = State(args.state_dir)
     # Before terraform, which would delete a dropped node's instance.
     removals = check_removed_members(state, cfg, auto_approve=args.auto_approve)
-    # The render would refuse a half-configured [oidc] only after terraform.
-    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
-    if oidc_table and (why := render.oidc_render_error(oidc_table)):
-        raise InstallError(why)
+    _check_oidc(cfg, state)
     state.ensure_keypairs()
     ansible.set_keys_dir(state.keys_dir)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -239,20 +347,7 @@ def _apply(cfg, args) -> int:
 
     # metal: the hosts exist, so there is nothing to plan or replace.
     if clouds.provisions(cfg):
-        tf.init(cfg)
-        # A worker that exists keeps its type: the license never resizes one.
-        existing = tf.instance_types(cfg)
-        # A cluster that exists stays in the kind of VPC it has.
-        if cfg.cloud_name == "aws":
-            clouds.CLOUDS["aws"].check_network_switch(cfg, *tf.network(cfg))
-        # A worker that exists keeps its kind of data disk (EBS or instance store).
-        if cfg.cloud_name == "aws" and any(n.name in existing for n in cfg.nodes_with("worker")):
-            clouds.CLOUDS["aws"].check_data_disk_switch(cfg, set(existing), tf.data_volumes(cfg))
-        for warning in license.free_tier_warnings(cfg, existing):
-            log(f"warning: {warning}")
-        tfvars = tf.write_tfvars(cfg, state, args.out_dir, existing)
-        plan = os.path.join(args.out_dir, "tf.plan")
-        tf.plan(cfg, tfvars, plan)
+        plan = _plan_instances(cfg, state, args.out_dir)
         # Before the apply: a replaced control node takes its state with it.
         control_carry.save(cfg, state, control_carry.plan_json(cfg, plan))
         tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
@@ -374,18 +469,8 @@ def _apply_gke(cfg, args) -> int:
     from . import kube, kube_render
     from .clouds import gke
     key = license.key_path(cfg)
-    if errs := telemetry.errors(cfg) + gke.license_errors(cfg):
-        raise InstallError("; ".join(errs))
     state = State(args.state_dir)
-    oidc_table = {**cfg.doc.get("oidc", {}), **state.load_providers().get("oidc", {})}
-    if oidc_table and (why := render.oidc_render_error(oidc_table)):
-        raise InstallError(why)
-    errs, warns, facts = gke.live_checks(cfg)
-    errs += gke.state_errors(cfg, state)
-    for warning in gke.warnings(cfg) + warns:
-        log(f"warning: {warning}")
-    if errs:
-        raise InstallError("\n  ".join(["this apply can't go on:"] + errs))
+    facts = _gke_checks(cfg, state)
     state.ensure_keypairs()
     ansible.set_keys_dir(state.keys_dir)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -395,18 +480,7 @@ def _apply_gke(cfg, args) -> int:
     # The guard asks a cluster that exists through the previous apply's outputs.
     storage = storage_engine.check_guard(cfg, state, assets_root)
 
-    tf.init(cfg)
-    # The pool never shrinks under a running worker: kube.deploy drains and
-    # removes workers (and their nodes) itself.
-    live = kube.live_worker_replicas(cfg, state)
-    tfvars = gke.write_tfvars(cfg, state, args.out_dir, live, facts)
-    plan = os.path.join(args.out_dir, "tf.plan")
-    tf.plan(cfg, tfvars, plan)
-    # Every plan, the first included: a state that was lost looks like a first apply, and its
-    # plan is the one that would replace what the cluster already has.
-    import json
-    if problems := gke.plan_problems(json.loads(tf.show_json(cfg, plan))):
-        raise InstallError("\n  ".join(["refusing the terraform plan:"] + problems))
+    plan = _plan_gke(cfg, state, args.out_dir, facts)
     tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
     tf_out = tf.read_outputs(cfg, state)
     ansible.set_tf_outputs(tf_out)
@@ -888,6 +962,8 @@ def main() -> int:
     sub.add_parser("validate")
     pr = sub.add_parser("render")
     pr.add_argument("--fake-tf", help="JSON file standing in for terraform outputs")
+    sub.add_parser("plan", help="what the next apply's terraform would change (GCP, AWS, "
+                                "GKE); changes nothing")
     pa = sub.add_parser("apply")
     pa.add_argument("-y", "--auto-approve", action="store_true",
                     help="don't ask before taking out nodes that cluster.toml no longer lists "
@@ -962,7 +1038,7 @@ Changes take effect on the next `apply`.""")
         args.out_dir = tempfile.mkdtemp(prefix="boxd-installer-out-")
         tmp_out = True
     try:
-        rc = {"validate": cmd_validate, "render": cmd_render,
+        rc = {"validate": cmd_validate, "render": cmd_render, "plan": cmd_plan,
               "apply": cmd_apply, "destroy": cmd_destroy, "ctl": cmd_ctl,
               "state": cmd_state, "providers": cmd_providers,
               "windows-image": cmd_windows_image}[args.cmd](args)

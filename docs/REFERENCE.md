@@ -1240,7 +1240,8 @@ the pod and keeps the disk.
   can't change after the first apply.
 - The worker pool's machine type, local SSD count and `host_kernel` can't
   change on a running cluster: GKE would recreate every worker node.
-  `apply` refuses such a terraform plan.
+  `apply` refuses such a terraform plan; `./boxd-install plan` shows it
+  first without changing anything.
 - With `create`, GKE's node upgrades are held by a maintenance exclusion
   until the version's end of support; control-plane patches still land, at
   weekends.
@@ -1672,6 +1673,17 @@ data_disk_gb = 500
 ./boxd-install validate && ./boxd-install apply
 boxd-ctl status                  # on a control node: the new worker should appear in the count
 ```
+
+To see first what the next `apply` would change in terraform, run
+`./boxd-install plan` (GCP, AWS and GKE). It changes nothing: it runs
+`apply`'s checks before terraform, writes the same tfvars and prints
+`terraform plan`. It reads the installer state and never pushes it back. A
+node dropped from `cluster.toml` is warned about, not asked about; a control
+node the plan replaces is named; on GKE, a plan `apply` would refuse is an
+error. Checks that need the assets bundle run only in `apply`. To keep
+`terraform.tfvars.json` and `tf.plan`, pass `--out-dir DIR` (through
+`./boxd-install`, a directory inside the checkout). Bare metal has no
+terraform: `./boxd-install render` shows the configs an apply installs.
 
 On bare metal, prepare the host first ([Install on bare metal](INSTALL.md#1-prepare-the-hosts))
 and give the node `data_disk` instead of `data_disk_gb`. Until the host has

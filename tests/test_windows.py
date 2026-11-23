@@ -183,8 +183,9 @@ class LicenseFeature(unittest.TestCase):
 
     def test_validate_and_apply_check_it_before_terraform(self):
         self.assertIn("windows.errors(cfg)", inspect.getsource(main.cmd_validate))
-        src = inspect.getsource(main._apply)
-        self.assertLess(src.index("windows.errors(cfg)"), src.index("tf.init(cfg)"))
+        for cmd in (main._apply, main.cmd_plan):
+            src = inspect.getsource(cmd)
+            self.assertLess(src.index("windows.errors(cfg)"), src.index("_plan_instances("))
 
 
 class ReleaseGate(unittest.TestCase):
@@ -213,7 +214,8 @@ class ReleaseGate(unittest.TestCase):
 
     def test_it_runs_before_terraform(self):
         src = inspect.getsource(main._apply)
-        self.assertLess(src.index("windows.check_bundle(cfg, assets_root)"), src.index("tf.init(cfg)"))
+        self.assertLess(src.index("windows.check_bundle(cfg, assets_root)"),
+                        src.index("_plan_instances("))
 
     def test_the_worker_files(self):
         full = self.bundle("bin/uefi.fd", "bin/boxd-sdk.exe", "bin/boxd-run.exe")
