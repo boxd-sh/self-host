@@ -477,7 +477,7 @@ def main() -> int:
     p.add_argument("--cluster", default=os.path.join(ROOT, "cluster.toml"))
     p.add_argument("--state-dir", help="default: a fresh random dir under /tmp")
     p.add_argument("--out-dir", help="default: a fresh random dir under /tmp; "
-                   "apply/destroy delete it when done (rendered configs carry secrets)")
+                   "apply, plan and destroy delete it when done (rendered configs carry secrets)")
     p.add_argument("--cache-dir", default=os.path.join(ROOT, "cache"))
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate")
