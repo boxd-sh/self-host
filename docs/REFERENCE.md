@@ -1678,9 +1678,10 @@ To see first what the next `apply` would change in terraform, run
 `./boxd-install plan` (GCP, AWS and GKE). It changes nothing: it runs
 `apply`'s checks before terraform, writes the same tfvars and prints
 `terraform plan`. It reads the installer state and never pushes it back. A
-node dropped from `cluster.toml` is warned about, not asked about; a control
-node the plan replaces is named; on GKE, a plan `apply` would refuse is an
-error. Checks that need the assets bundle run only in `apply`. To keep
+node dropped from `cluster.toml` that still has an instance is warned about,
+not asked about; a control node the plan replaces is named; on GKE, a plan
+`apply` would refuse is an error. Checks that need the assets bundle run
+only in `apply`. To keep
 `terraform.tfvars.json` and `tf.plan`, pass `--out-dir DIR` (through
 `./boxd-install`, a directory inside the checkout). Bare metal has no
 terraform: `./boxd-install render` shows the configs an apply installs.

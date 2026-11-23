@@ -35,9 +35,10 @@ class Plan(unittest.TestCase):
         self.out_dir = os.path.join(self.dir, "out")
         self.args = mock.Mock(cluster="unused", state_dir=self.state_dir, out_dir=self.out_dir)
 
-    def run_plan(self, doc, prior=None, replaced=(), plan_gke=None):
-        """cmd_plan on `doc`; `prior` makes the pulled state (the cluster as
-        last applied). Returns (calls in order, stderr)."""
+    def run_plan(self, doc, prior=None, replaced=(), plan_gke=None, instances=()):
+        """apply.plan on `doc`; `prior` makes the pulled state (the cluster as
+        last applied), `instances` the nodes terraform has an instance for.
+        Returns (calls in order, stderr)."""
         calls = []
         def pull(cfg, state_dir):
             calls.append("pull")
@@ -66,7 +67,8 @@ class Plan(unittest.TestCase):
                                  _gke_checks=lambda cfg, state: calls.append("gke_checks")
                                  or {"vpc_mtu": 1460},
                                  control_carry=cc,
-                                 tf=mock.Mock(side_effect=AssertionError("tf"))), \
+                                 tf=mock.Mock(instance_types=mock.Mock(
+                                     return_value={n: "n2-standard-16" for n in instances}))), \
              mock.patch.object(State, "ensure_keypairs", lambda s: calls.append("keys")), \
              contextlib.redirect_stderr(err):
             self.assertEqual(apply.plan(config.Config(doc), self.args), 0)
@@ -105,10 +107,20 @@ class Plan(unittest.TestCase):
     def test_removed_node_warns_without_asking(self):
         doc = two_edge_doc()
         with mock.patch("builtins.input", side_effect=AssertionError("asked")):
-            calls, err = self.run_plan(without(doc, WORKER), prior=doc)
+            calls, err = self.run_plan(without(doc, WORKER), prior=doc, instances=[WORKER])
         self.assertIn("plan_instances", calls)
-        self.assertIn("no longer lists", err)
+        self.assertIn("warning: cluster.toml no longer lists", err)
+        self.assertIn("boxd-ctl node drain worker-", err)
         self.assertIn(WORKER, err)
+
+    def test_removed_node_without_an_instance_is_a_note_not_a_warning(self):
+        """A state that outlived its cluster: apply would ask nothing, so plan warns of nothing."""
+        doc = two_edge_doc()
+        calls, err = self.run_plan(without(doc, WORKER), prior=doc)
+        self.assertIn("plan_instances", calls)
+        self.assertIn(f"nothing to take out: {WORKER} (worker ", err)
+        self.assertNotIn("warning:", err)
+        self.assertNotIn("node drain", err)
 
     def test_replaced_control_node_noted(self):
         doc = example("gcp")

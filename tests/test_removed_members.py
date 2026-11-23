@@ -5,6 +5,7 @@ its ids are retired for good. Run: python3 -m unittest discover -s tests"""
 import _isolation  # noqa: F401  (first: the tests never read the real customer defaults)
 import contextlib
 import copy
+import inspect
 import io
 import os
 import tempfile
@@ -41,17 +42,19 @@ class RemovedMembers(unittest.TestCase):
         self.state.allocate(config.Config(self.doc))   # the cluster as first applied
         self.ids = self.state.data["node_ids"]
 
-    def check(self, doc, answer=None):
+    def check(self, doc, answer=None, existing=None):
         """check_removed_members with `answer` typed at the prompt; returns
-        (its result, the warning printed, the prompts asked)."""
+        (its result, the warning printed, the prompts asked). `existing`: the
+        nodes terraform has an instance for (None: not looked up, as on metal)."""
         prompts = []
         def ask(prompt):
             prompts.append(prompt)
             return answer
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            out = apply.check_removed_members(self.state, config.Config(doc),
-                                             ask if answer is not None else None)
+            out = apply.check_removed_members(
+                self.state, config.Config(doc), ask if answer is not None else None,
+                existing=None if existing is None else (lambda: set(existing)))
         return out, err.getvalue(), prompts
 
     def test_nothing_removed_asks_nothing(self):
@@ -92,6 +95,47 @@ class RemovedMembers(unittest.TestCase):
         ask.assert_not_called()
         self.assertIn(f"proxy proxy-{self.ids[f'{EDGE}/proxy']}", err.getvalue())
         self.assertIn("--auto-approve: taking them out", err.getvalue())
+
+    def test_a_node_without_an_instance_is_not_asked_about(self):
+        """After a destroy the state keeps every id. The cluster coming back
+        with fewer nodes has nothing to take out: no question, even with no
+        terminal, and the ids are still retired."""
+        doc = without(self.doc, EDGE)
+        with mock.patch("sys.stdin", io.StringIO("")):
+            out, said, prompts = self.check(doc, existing=[])
+        proxy, dns = self.ids[f"{EDGE}/proxy"], self.ids[f"{EDGE}/dns"]
+        self.assertEqual(out, {EDGE: {"proxy": proxy, "dns": dns}})
+        self.assertEqual(prompts, [])
+        self.assertIn(f"terraform has no instance for them, so there is nothing to take out: "
+                      f"{EDGE} (proxy {proxy}, dns {dns})", said)
+        self.assertNotIn("leaves the cluster unusable", said)
+        apply.retire_removed(self.state, out)
+        self.assertEqual(self.check(doc, "n", existing=[])[0], {})
+
+    def test_only_the_nodes_with_an_instance_are_asked_about(self):
+        doc = without(without(self.doc, EDGE), WORKER)
+        out, said, prompts = self.check(doc, "y", existing=[WORKER])
+        self.assertEqual(sorted(out), sorted([EDGE, WORKER]))     # both retired
+        self.assertEqual(len(prompts), 1)
+        warning = said[said.index("warning: "):]
+        self.assertIn(f"boxd-ctl node drain worker-{self.ids[f'{WORKER}/worker']}", warning)
+        self.assertNotIn(EDGE, warning)
+        self.assertIn(f"nothing to take out: {EDGE} ", said)
+        # A no still stops everything, the node without an instance included.
+        with self.assertRaises(InstallError):
+            self.check(doc, "n", existing=[WORKER])
+
+    def test_a_role_dropped_from_a_node_that_stays_is_asked_about(self):
+        doc = copy.deepcopy(self.doc)
+        next(n for n in doc["nodes"] if n["name"] == EDGE)["roles"] = ["dns:ns2"]
+        _, _, prompts = self.check(doc, "y", existing=[EDGE, WORKER])
+        self.assertEqual(len(prompts), 1)
+
+    def test_terraform_is_not_asked_when_nothing_was_removed(self):
+        def existing():
+            raise AssertionError("looked up instances")
+        self.assertEqual(apply.check_removed_members(self.state, config.Config(self.doc),
+                                                     existing=existing), {})
 
     def test_lost_raft_role_counts(self):
         doc = copy.deepcopy(self.doc)
@@ -139,13 +183,47 @@ class ApplyAsksBeforeTerraform(unittest.TestCase):
                 mock.patch.object(apply.sys.stdin, "isatty", return_value=True), \
                 mock.patch("builtins.input", return_value="n") as ask, \
                 mock.patch.object(State, "ensure_keypairs") as keys, \
-                mock.patch.object(tf, "init") as init, \
+                mock.patch.object(tf, "init"), \
+                mock.patch.object(tf, "instance_types", return_value={EDGE: "e2-small"}), \
+                mock.patch.object(tf, "plan") as plan, \
                 contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(InstallError):
                 apply._apply(config.Config(without(doc, EDGE)), args)
         ask.assert_called_once()
         keys.assert_not_called()
-        init.assert_not_called()
+        # terraform was only read, to see which dropped nodes have an instance.
+        plan.assert_not_called()
+
+    def test_a_destroyed_cluster_coming_back_smaller_is_not_asked(self):
+        """What `destroy` then `apply` with fewer nodes hits: no instance
+        left, so no question, and the apply goes on (here, to its keys)."""
+        doc = two_edge_doc()
+        state_dir = tempfile.mkdtemp()
+        st = State(state_dir)
+        st.allocate(config.Config(doc))
+        st.save()
+        args = types.SimpleNamespace(state_dir=state_dir, out_dir=tempfile.mkdtemp(),
+                                     cache_dir=tempfile.mkdtemp(), auto_approve=False)
+        class Reached(Exception):
+            pass
+        err = io.StringIO()
+        with mock.patch.object(license, "key_path", return_value=None), \
+                mock.patch.object(telemetry, "errors", return_value=[]), \
+                mock.patch.object(apply.sys.stdin, "isatty", return_value=False), \
+                mock.patch("builtins.input", side_effect=AssertionError("asked")), \
+                mock.patch.object(State, "ensure_keypairs", side_effect=Reached), \
+                mock.patch.object(tf, "init"), \
+                mock.patch.object(tf, "instance_types", return_value={}), \
+                contextlib.redirect_stderr(err):
+            with self.assertRaises(Reached):
+                apply._apply(config.Config(without(doc, EDGE)), args)
+        self.assertIn(f"nothing to take out: {EDGE} ", err.getvalue())
+
+    def test_bare_metal_is_always_asked(self):
+        """No terraform there: the hosts are the operator's, so every dropped
+        node is asked about, as before."""
+        src = inspect.getsource(apply._preflight)
+        self.assertIn("if clouds.provisions(cfg) else None", src)
 
 class AutoApproveFlag(unittest.TestCase):
     def test_parsed(self):

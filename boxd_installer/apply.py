@@ -49,8 +49,11 @@ def _preflight(cfg, args):
         raise InstallError("; ".join(errs))
     check_existing_vpc(cfg)
     state = State(args.state_dir)
-    # Before terraform, which would delete a dropped node's instance.
-    removals = check_removed_members(state, cfg, auto_approve=args.auto_approve)
+    # Before terraform, which would delete a dropped node's instance. On a
+    # cloud, only the dropped nodes that have one are asked about.
+    removals = check_removed_members(
+        state, cfg, auto_approve=args.auto_approve,
+        existing=(lambda: instance_names(cfg)) if clouds.provisions(cfg) else None)
     _check_oidc(cfg, state)
     state.ensure_keypairs()
     cluster.set_keys_dir(state.keys_dir)
@@ -294,7 +297,11 @@ def plan(cfg, args) -> int:
         else:
             # apply asks here; a plan only says what the apply would ask about.
             if removed := state.removed_members(cfg):
-                log(f"warning: {_removal_warning(cfg, removed)}")
+                live, gone = split_removed(removed, lambda: instance_names(cfg))
+                if gone:
+                    log(_gone_note(gone))
+                if live:
+                    log(f"warning: {_removal_warning(cfg, live)}")
             _check_oidc(cfg, state)
         fresh = not os.path.exists(os.path.join(state.keys_dir, "boxd-deploy.pub"))
         # On a fresh cluster these are thrown away with the rest of this
@@ -428,19 +435,30 @@ def _removal_steps(role: str, node_id: int) -> list[str]:
             "cluster stops. Ask boxd first; the voter leaves with:",
             f"    boxd-ctl remove-peer {node_id}      (on the leader)"]
 
-def check_removed_members(state, cfg, ask=None,
-                          auto_approve: bool = False) -> dict[str, dict[str, int]]:
+def check_removed_members(state, cfg, ask=None, auto_approve: bool = False,
+                          existing=None) -> dict[str, dict[str, int]]:
     """An apply whose cluster.toml has dropped a Raft member (a node, or one
     of its roles) takes it out of the cluster, and on a cloud terraform
     deletes its instance. Nothing in the cluster forgets it on its own, so
     say what that breaks and what to run first, and go on only on a yes.
-    Returns what was confirmed, for retire_removed. `ask` is the prompt
+    Returns every removal, for retire_removed. `ask` is the prompt
     (input() at a terminal); without a terminal the apply stops, unless
-    --auto-approve answered yes up front (the warning still goes to the log)."""
+    --auto-approve answered yes up front (the warning still goes to the log).
+
+    `existing` (cloud targets) is called for the names of the nodes terraform
+    has an instance for. A dropped node with none is not asked about: there
+    is no instance to delete and no node to drain. That is every node after
+    a destroy, whose state keeps the ids, when the cluster comes back with
+    fewer nodes. Its ids are retired like the others'."""
     removed = state.removed_members(cfg)
     if not removed:
         return {}
-    warning = _removal_warning(cfg, removed)
+    live, gone = split_removed(removed, existing)
+    if gone:
+        log(_gone_note(gone))
+    if not live:
+        return removed
+    warning = _removal_warning(cfg, live)
     if auto_approve:
         print(f"warning: {warning}\n--auto-approve: taking them out", file=sys.stderr)
         return removed
@@ -454,6 +472,29 @@ def check_removed_members(state, cfg, ask=None,
     if answer.strip().lower() not in ("y", "yes"):
         raise InstallError("apply stopped; nothing was changed")
     return removed
+
+def instance_names(cfg) -> set[str]:
+    """The nodes terraform has an instance for; none once a cluster is destroyed."""
+    tf.init(cfg)
+    return set(tf.instance_types(cfg))
+
+def split_removed(removed: dict[str, dict[str, int]], existing) -> tuple[dict, dict]:
+    """(the removals whose node has an instance, the ones whose node has none).
+    Without `existing` (bare metal: the hosts are the operator's) all count as
+    having one."""
+    if existing is None:
+        return removed, {}
+    have = existing()
+    return ({n: r for n, r in removed.items() if n in have},
+            {n: r for n, r in removed.items() if n not in have})
+
+def _gone_note(gone: dict[str, dict[str, int]]) -> str:
+    names = ", ".join(f"{name} ({', '.join(f'{role} {i}' for role, i in roles.items())})"
+                      for name, roles in gone.items())
+    return ("cluster.toml no longer lists these nodes, and terraform has no instance for "
+            f"them, so there is nothing to take out: {names}. apply only forgets their ids. "
+            "If a running cluster still shows one as a peer (`boxd-ctl status`), remove it "
+            "with `boxd-ctl remove-peer <id>` on the leader.")
 
 def _removal_warning(cfg, removed: dict[str, dict[str, int]]) -> str:
     lines = ["cluster.toml no longer lists these nodes (or roles), so this apply takes them "
