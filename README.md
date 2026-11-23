@@ -19,6 +19,7 @@ source; the binaries have their own license (see [License](#license)).
 | [Install on AWS](docs/INSTALL.md#install-on-aws)
 | [Install on bare metal](docs/INSTALL.md#install-on-bare-metal)
 | [Reference](docs/REFERENCE.md)
+| [How the installer works](docs/ARCHITECTURE.md)
 | [Operations](OPERATIONS.md)
 | [Releases](https://github.com/boxd-sh/self-host/releases)
 

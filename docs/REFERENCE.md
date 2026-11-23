@@ -1684,6 +1684,8 @@ error. Checks that need the assets bundle run only in `apply`. To keep
 `terraform.tfvars.json` and `tf.plan`, pass `--out-dir DIR` (through
 `./boxd-install`, a directory inside the checkout). Bare metal has no
 terraform: `./boxd-install render` shows the configs an apply installs.
+[How the installer works](ARCHITECTURE.md) says where `plan` sits among
+`apply`'s phases.
 
 On bare metal, prepare the host first ([Install on bare metal](INSTALL.md#1-prepare-the-hosts))
 and give the node `data_disk` instead of `data_disk_gb`. Until the host has
