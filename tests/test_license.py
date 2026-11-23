@@ -16,7 +16,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, license, main, telemetry, tf
+from boxd_installer import cluster, config, license, main, telemetry, tf
 from boxd_installer.util import InstallError
 
 from test_machine_sizes import FakeState, aws_doc, validate
@@ -399,9 +399,9 @@ class InstallLicense(LicenseCluster):
         cfg = self.cfg(aws_doc(), key=True)
         result = subprocess.CompletedProcess([], returncode, stdout, stderr)
         err = io.StringIO()
-        with mock.patch.object(ansible, "_ssh", return_value=result) as ssh, \
+        with mock.patch.object(cluster, "_ssh", return_value=result) as ssh, \
              contextlib.redirect_stderr(err):
-            ansible.install_license(cfg, os.path.join(self.dir, "license.key"))
+            cluster.install_license(cfg, os.path.join(self.dir, "license.key"))
         return ssh, err.getvalue()
 
     def test_key_goes_on_stdin_not_the_command_line(self):
@@ -431,9 +431,9 @@ class InitClusterId(LicenseCluster):
         cfg = self.cfg(aws_doc())
         result = subprocess.CompletedProcess([], returncode, stdout, stderr)
         err = io.StringIO()
-        with mock.patch.object(ansible, "ctl", return_value=result) as ctl, \
+        with mock.patch.object(cluster, "ctl", return_value=result) as ctl, \
              contextlib.redirect_stderr(err):
-            ansible.init_cluster_id(cfg)
+            cluster.init_cluster_id(cfg)
         return ctl, err.getvalue()
 
     def test_runs_the_verb(self):
@@ -471,9 +471,10 @@ class ApplyOrder(LicenseCluster):
                                  # The example's workers are on EBS.
                                  data_volumes=mock.Mock(return_value=set(existing)),
                                  network=mock.Mock(return_value=(network, network_ids or {}))), \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(main.ansible, "converge", calls.converge), \
+             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
+                                 wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,

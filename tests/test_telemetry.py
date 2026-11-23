@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest import mock
 
-from boxd_installer import ansible, config, main, render, telemetry
+from boxd_installer import cluster, config, main, render, telemetry
 from boxd_installer.util import InstallError
 
 from test_machine_sizes import FakeAlloc, FakeState, aws_doc, validate
@@ -133,10 +133,10 @@ class SetTelemetry(Isolated):
         cfg = config.Config(aws_doc())
         results = [subprocess.CompletedProcess([], rc, "", err) for rc, err in results]
         logs = []
-        with mock.patch.object(ansible, "_ssh", side_effect=results) as ssh, \
-                mock.patch.object(ansible.time, "sleep"), \
-                mock.patch.object(ansible, "log", side_effect=logs.append):
-            ansible.set_telemetry(cfg, enabled, explicit)
+        with mock.patch.object(cluster, "_ssh", side_effect=results) as ssh, \
+                mock.patch.object(cluster.time, "sleep"), \
+                mock.patch.object(cluster, "log", side_effect=logs.append):
+            cluster.set_telemetry(cfg, enabled, explicit)
         return [c.args[2] for c in ssh.call_args_list], logs
 
     def test_on_and_off(self):
@@ -186,9 +186,10 @@ class ApplyPassesTheSetting(Isolated):
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(main.ansible, "converge", mock.Mock()), \
+             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=mock.DEFAULT, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
+                                 wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,
@@ -223,9 +224,10 @@ class ApplyPassesTheSetting(Isolated):
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(main.ansible, "converge", calls.converge), \
+             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=calls.converge, wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
+                                 wait_for_leader=mock.DEFAULT, sync_config=mock.DEFAULT, deployed_network_modes=mock.Mock(return_value={}), machine_count=mock.Mock(return_value=0),
                                  learners_gave_up=mock.Mock(return_value=[]),
                                  _registered_nodes=mock.Mock(return_value=9),
                                  verify_registration=mock.DEFAULT,

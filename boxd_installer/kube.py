@@ -41,7 +41,7 @@ import tempfile
 import time
 import tomllib
 
-from . import ansible, kube_render, tf
+from . import cluster, kube_render, tf
 from .clouds import gke
 from .kube_render import CONFIG_HASH, SPEC_HASH, SRC
 from .util import InstallError, log, run
@@ -97,10 +97,10 @@ def connect(cfg, tf_out: dict) -> None:
     _kubeconfig = path
 
 def _ensure(cfg) -> None:
-    """Connect from the outputs ansible.set_tf_outputs was given (a ctl call
+    """Connect from the outputs cluster.set_tf_outputs was given (a ctl call
     before terraform reads the previous apply's)."""
     if _kubeconfig is None:
-        connect(cfg, ansible._tf_out)
+        connect(cfg, cluster._tf_out)
 
 def kubectl(cfg, *args: str, check: bool = True, quiet: bool = True,
             input: str | None = None):
@@ -208,7 +208,7 @@ def registered_ids(status_out: str) -> set[str]:
     return ids
 
 def _registered(cfg) -> set[str]:
-    res = ansible.ctl(cfg, "status", check=False, quiet=True)
+    res = cluster.ctl(cfg, "status", check=False, quiet=True)
     return registered_ids(res.stdout) if res.returncode == 0 else set()
 
 def _ctl_err(res) -> str:
@@ -221,7 +221,7 @@ def drain(cfg, worker_id: str) -> None:
     and a last line, and exits 1 while machines are left on it, 0 once it is
     empty. Anything but 0 stops here: the worker stays."""
     log(f"draining {worker_id} (every machine moves to another worker)…")
-    res = ansible.ctl(cfg, f"node drain {worker_id}", check=False, quiet=True)
+    res = cluster.ctl(cfg, f"node drain {worker_id}", check=False, quiet=True)
     err = _ctl_err(res)
     if res.returncode != 0:
         if "unrecognized subcommand" in err:
@@ -405,9 +405,9 @@ def remove_worker(cfg, state, i: int, groups: list[str]) -> None:
     wid = f"worker-{rec['id']}" if rec.get("id") is not None else None
     log(f"removing boxd-worker-{i}" + (f" ({wid})" if wid else ""))
     if wid and wid in _registered(cfg):
-        ansible.ctl(cfg, f"node exclude {wid}")
+        cluster.ctl(cfg, f"node exclude {wid}")
         drain(cfg, wid)
-        res = ansible.ctl(cfg, f"node mark-dead {wid}", check=False)
+        res = cluster.ctl(cfg, f"node mark-dead {wid}", check=False)
         if res.returncode != 0 and "dead" not in _ctl_err(res).lower():
             raise InstallError(f"boxd-ctl node mark-dead {wid} refused, so the worker stays "
                                f"(is a machine still on it? `boxd-ctl vm list`): "
@@ -417,8 +417,8 @@ def remove_worker(cfg, state, i: int, groups: list[str]) -> None:
     _wait(lambda: _worker_pod(cfg, i) is None, ROLLOUT_TIMEOUT, 5,
           f"boxd-worker-{i} was not gone")
     if rec.get("id") is not None:
-        leader = ansible.leader_node(cfg)
-        ansible.ctl_on(cfg, leader, f"remove-peer {rec['id']}")
+        leader = cluster.leader_node(cfg)
+        cluster.ctl_on(cfg, leader, f"remove-peer {rec['id']}")
     for claim in (f"state-boxd-worker-{i}", f"data-boxd-worker-{i}"):
         kubectl(cfg, "delete", "pvc", claim, "--ignore-not-found", "--wait=false")
     if rec.get("node"):
@@ -474,13 +474,13 @@ def recreate_worker(cfg, i: int, worker_id: str | None) -> None:
     old = (_worker_pod(cfg, i) or {}).get("metadata", {}).get("uid")
     registered = worker_id and worker_id in _registered(cfg)
     if registered:
-        ansible.ctl(cfg, f"node exclude {worker_id}")
+        cluster.ctl(cfg, f"node exclude {worker_id}")
         try:
             drain(cfg, worker_id)
         except InstallError as e:
             # Its pod stays as it was: back in placement, or it would stay out after the change
             # is reverted too (a pod that matches the spec is never recreated, nor included).
-            ansible.ctl(cfg, f"node include {worker_id}")
+            cluster.ctl(cfg, f"node include {worker_id}")
             raise InstallError(f"{e}\n{worker_id} is back in placement with its pod unchanged: "
                                "the change needs its machines moved first (each pod spec change "
                                "recreates the worker's pod)") from None
@@ -493,7 +493,7 @@ def recreate_worker(cfg, i: int, worker_id: str | None) -> None:
         _wait(lambda: worker_id in _registered(cfg), REGISTER_TIMEOUT, 10,
               f"{worker_id} did not register again after its pod was recreated",
               f"kubectl -n {namespace(cfg)} logs {pod} -c worker")
-        ansible.ctl(cfg, f"node include {worker_id}")
+        cluster.ctl(cfg, f"node include {worker_id}")
 
 def _pod_ready(cfg, pod: str, other_than: str | None = None) -> bool:
     p = get(cfg, "pod", pod)
@@ -653,14 +653,14 @@ def deploy(cfg, r, state, out_dir: str, tf_out: dict) -> None:
     control = r.control_objects(hashes["control"])
     apply(cfg, control, out_dir, "control")
     rollout(cfg, "boxd-control")
-    ansible.wait_for_leader(cfg)
+    cluster.wait_for_leader(cfg)
     # sync-config reads the leader's config file: the Secret's new content
     # must be there first (control reads its config from the mount).
     for n in cfg.nodes_with("control"):
         i = gke.ordinal(n.name)
         wait_for_file(cfg, f"boxd-control-{i}", "control", f"{SRC}/control-{i}.toml",
                       files[f"control-{i}.toml"])
-    ansible.sync_config(cfg)
+    cluster.sync_config(cfg)
 
     console = r.console_objects(hashes["console"], downloads=downloads)
     apply(cfg, console, out_dir, "console")

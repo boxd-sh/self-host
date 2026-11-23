@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from boxd_installer import config, kube, main
+from boxd_installer import cluster, config, kube, main
 from boxd_installer.util import InstallError
 
 from test_gke_config import gke_doc
@@ -37,7 +37,7 @@ class DeployOrder(unittest.TestCase):
                                  prune=calls.prune, verify_registration=calls.verify_registration,
                                  _sts_replicas=calls.sts, _pods=calls.pods, _wait_crd=calls.crd,
                                  clickhouse_schema=calls.clickhouse_schema), \
-                mock.patch.multiple(kube.ansible, wait_for_leader=calls.wait_for_leader,
+                mock.patch.multiple(kube.cluster, wait_for_leader=calls.wait_for_leader,
                                     sync_config=calls.sync_config):
             kube.deploy(cfg, r, r.state, "/tmp/out", TF_OUT)
         self.assertEqual(applied, ["base", "secret", "clickhouse", "control", "console", "edge-0",
@@ -86,7 +86,7 @@ class ApplyGke(unittest.TestCase):
                                  live_worker_replicas=mock.Mock(return_value=2),
                                  pull_config=mock.Mock(return_value=None)), \
              mock.patch("boxd_installer.kube_render.KubeRenderer") as renderer_cls, \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT, set_tf_outputs=mock.DEFAULT,
+             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT, set_tf_outputs=mock.DEFAULT,
                                  pause_machine_specs=calls.pause, worker_egress_ca=mock.DEFAULT,
                                  init_cluster_id=calls.init_cluster_id, turn_on_machine_specs=mock.DEFAULT,
                                  install_license=mock.DEFAULT, set_telemetry=mock.DEFAULT,
@@ -216,7 +216,7 @@ class RecreateWorker(unittest.TestCase):
         with mock.patch.multiple(kube, drain=drain, kubectl=kubectl, _wait=mock.Mock(),
                                  _worker_pod=mock.Mock(return_value={"metadata": {"uid": "u1"}}),
                                  _registered=mock.Mock(return_value={"worker-5"})), \
-                mock.patch.object(kube.ansible, "ctl", ctl):
+                mock.patch.object(kube.cluster, "ctl", ctl):
             try:
                 kube.recreate_worker(cfg, 0, "worker-5")
             finally:

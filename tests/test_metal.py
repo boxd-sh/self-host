@@ -9,7 +9,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, license, main, remote_state, render, tf
+from boxd_installer import cluster, config, license, main, remote_state, render, tf
 from boxd_installer.clouds import metal
 from boxd_installer.util import InstallError
 
@@ -115,8 +115,8 @@ class MetalRender(unittest.TestCase):
         self.assertEqual(metal.ssh_target(node, {}), "10.60.0.20")
 
     def test_ssh_opts_have_no_tunnel(self):
-        with mock.patch.object(ansible, "_keys_dir", "/k"):
-            opts = ansible._ssh_opts(self.cfg)
+        with mock.patch.object(cluster, "_keys_dir", "/k"):
+            opts = cluster._ssh_opts(self.cfg)
         self.assertFalse(any(o.startswith("ProxyCommand") for o in opts))
 
     def test_proxy_advertises_public_ip(self):
@@ -185,10 +185,10 @@ class MetalCommands(unittest.TestCase):
     def test_check_hosts_prints_the_key(self):
         cfg = config.Config(metal_doc())
         denied = mock.Mock(returncode=255, stderr="Permission denied (publickey).")
-        with mock.patch.object(ansible, "_ssh", return_value=denied), \
-             mock.patch.object(ansible, "_keys_dir", "/k"), \
+        with mock.patch.object(cluster, "_ssh", return_value=denied), \
+             mock.patch.object(cluster, "_keys_dir", "/k"), \
              self.assertRaises(InstallError) as e:
-            ansible.check_hosts(cfg, "ssh-ed25519 AAAA boxd-deploy")
+            cluster.check_hosts(cfg, "ssh-ed25519 AAAA boxd-deploy")
         self.assertIn("boxd-metal-worker-0 (ubuntu@203.0.113.20): ssh failed", str(e.exception))
         self.assertIn("  ssh-ed25519 AAAA boxd-deploy\n", str(e.exception))
 
@@ -197,9 +197,9 @@ class MetalCommands(unittest.TestCase):
         def ssh(cfg, node, cmd, **kw):
             self.assertEqual("test -c /dev/kvm" in cmd, node.has("worker"))
             return mock.Mock(returncode=1 if node.has("worker") else 0, stderr="")
-        with mock.patch.object(ansible, "_ssh", side_effect=ssh), \
+        with mock.patch.object(cluster, "_ssh", side_effect=ssh), \
              self.assertRaisesRegex(InstallError, "no\n?.*/dev/kvm"):
-            ansible.check_hosts(cfg, "k")
+            cluster.check_hosts(cfg, "k")
 
 if __name__ == "__main__":
     unittest.main()

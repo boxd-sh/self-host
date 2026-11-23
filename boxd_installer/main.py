@@ -8,9 +8,9 @@ import shlex
 import shutil as _shutil
 import subprocess
 
-from . import (ansible, assets, clouds, composio, config, control_carry, license, local_ca,
-               oidc, private_services, remote_state, render, storage_engine, telemetry, tf,
-               windows, windows_image)
+from . import (ansible, assets, clouds, cluster, composio, config, control_carry, license,
+               local_ca, oidc, private_services, remote_state, render, storage_engine,
+               telemetry, tf, windows, windows_image)
 from .state import Allocation, State, generate_egress_ca
 from .util import InstallError, log
 
@@ -328,12 +328,12 @@ def _apply(cfg, args) -> int:
     removals = check_removed_members(state, cfg, auto_approve=args.auto_approve)
     _check_oidc(cfg, state)
     state.ensure_keypairs()
-    ansible.set_keys_dir(state.keys_dir)
+    cluster.set_keys_dir(state.keys_dir)
     os.makedirs(args.out_dir, exist_ok=True)
     if not clouds.provisions(cfg):
         # Terraform puts the deploy key on cloud instances; on metal the
         # operator does, so this stops a first apply until they have.
-        ansible.check_hosts(cfg, state.deploy_pubkey())
+        cluster.check_hosts(cfg, state.deploy_pubkey())
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
     check_storage_bundle(cfg, assets_root)
@@ -354,7 +354,7 @@ def _apply(cfg, args) -> int:
     # The removed nodes' instances are gone now (on metal, out of the config).
     retire_removed(state, removals)
     tf_out = tf.read_outputs(cfg, state)
-    ansible.set_tf_outputs(tf_out)
+    cluster.set_tf_outputs(tf_out)
 
     cfg.apply_overlay(state.load_providers())
     # The sign-in clients live in the providers overlay, not cfg.doc.
@@ -371,34 +371,34 @@ def _apply(cfg, args) -> int:
     r = render.Renderer(cfg, alloc, tf_out, state, assets_root=assets_root)
     _write_out(r.render_all(), args.out_dir)
 
-    ansible.preflight(cfg)
+    cluster.preflight(cfg)
     check_network_mode(cfg, state)
     storage_engine.check_identity(cfg, storage, r)
     if not clouds.provisions(cfg):
-        for warning in license.free_tier_warnings(cfg, counted=ansible.worker_vcpus(cfg)):
+        for warning in license.free_tier_warnings(cfg, counted=cluster.worker_vcpus(cfg)):
             log(f"warning: {warning}")
     # Last before the converge, so a check that refuses the apply leaves them on.
     if bundle_changes(state, cfg):
-        ansible.pause_machine_specs(cfg)
-    ansible.converge(cfg, args.out_dir, assets_root,
+        cluster.pause_machine_specs(cfg)
+    ansible.converge(cfg, args.out_dir, assets_root, state.keys_dir,
                      assets.host_kernel_release(assets_root),
                      control_carry.carry_dir(state))
 
-    ansible.wait_for_leader(cfg)
+    cluster.wait_for_leader(cfg)
     # A node added to cluster.toml joins a running cluster only through the
     # leader's sync-config (a no-op on a fresh cluster and on a re-apply).
-    ansible.sync_config(cfg)
+    cluster.sync_config(cfg)
     expected = len(cfg.nodes_with("worker"))
-    gave_up = ansible.learners_gave_up(cfg)
-    restarted = gave_up or (ansible._registered_nodes(cfg) or 0) < expected
+    gave_up = cluster.learners_gave_up(cfg)
+    restarted = gave_up or (cluster._registered_nodes(cfg) or 0) < expected
     if restarted:
         if gave_up:
             # Expected on a fresh cluster: they started before the raft
             # leader existed. The restart below fixes it.
             log(f"restarting services that gave up registering (they started before "
                 f"the raft leader): {', '.join(gave_up)}")
-        ansible.restart_learners(cfg)
-    ansible.verify_registration(cfg, expected=expected)
+        cluster.restart_learners(cfg)
+    cluster.verify_registration(cfg, expected=expected)
     if restarted:
         log("after the restart, every node registered")
     control_carry.clear(state)
@@ -416,12 +416,12 @@ def _finish(cfg, args, state, r, key, storage, assets_root: str,
     # Every node (control, proxy, console) runs the new bundle now, so the
     # cluster ID can be made (once; a no-op after). Before the key: a bound
     # key needs it.
-    ansible.init_cluster_id(cfg)
+    cluster.init_cluster_id(cfg)
     # For the same reason: an older node would skip their entries for good.
-    ansible.turn_on_machine_specs(cfg)
+    cluster.turn_on_machine_specs(cfg)
     # Before the templates, so the key is in place before any machine is made.
     if key:
-        ansible.install_license(cfg, key)
+        cluster.install_license(cfg, key)
     # After the key: a bucket default needs its bucket-storage feature. The
     # guard is pushed to the state bucket the moment the catalog is on.
     storage_engine.set_switches(
@@ -431,16 +431,16 @@ def _finish(cfg, args, state, r, key, storage, assets_root: str,
     if value is None:
         log("telemetry: [telemetry] enabled is not set; the cluster's setting is left as it is")
     else:
-        ansible.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
+        cluster.set_telemetry(cfg, value, explicit=source == telemetry.CLUSTER_TOML)
     # Every worker runs the new release and has the firmware now ([windows]).
     windows.configure(cfg, r.alloc)
 
     image, tag = assets.computer_image(assets_root)
     if image_override:
         image = image_override(image)
-    ansible.seed_templates(cfg, image, tag, cfg.assets_version,
+    cluster.seed_templates(cfg, image, tag, cfg.assets_version,
                            storage=storage_engine.template_storage(cfg))
-    ansible.configure_orgs(cfg, cfg.machine_sizes())
+    cluster.configure_orgs(cfg, cfg.machine_sizes())
 
     # The exact bundle this cluster now runs — with a channel, the only
     # record of what to pin to come back here (docs/REFERENCE.md "Upgrades and rollback").
@@ -453,7 +453,7 @@ def _finish(cfg, args, state, r, key, storage, assets_root: str,
     after = "the forwarder is in place" if cfg.ingress == "private" else "glue records propagate"
     print(f"\nConsole: https://app.{cfg.zone}  (after {after})")
     print(f"Assets: {cfg.assets_version}" + (f" (channel {cfg.assets_channel})" if cfg.assets_channel else ""))
-    if cfg.acme_ca == "gts" and ansible.acme_eab_spent(cfg):
+    if cfg.acme_ca == "gts" and cluster.acme_eab_spent(cfg):
         raise InstallError(
             "boxd-control can't register its ACME account: Google Trust Services says the "
             "EAB key was already used, so no certificate will ever be issued. Mint a new "
@@ -472,7 +472,7 @@ def _apply_gke(cfg, args) -> int:
     state = State(args.state_dir)
     facts = _gke_checks(cfg, state)
     state.ensure_keypairs()
-    ansible.set_keys_dir(state.keys_dir)
+    cluster.set_keys_dir(state.keys_dir)
     os.makedirs(args.out_dir, exist_ok=True)
 
     assets_root = assets.ensure(cfg, args.cache_dir, state)
@@ -483,7 +483,7 @@ def _apply_gke(cfg, args) -> int:
     plan = _plan_gke(cfg, state, args.out_dir, facts)
     tf.apply_plan(cfg, plan, before=lambda: _checkpoint(cfg, args))
     tf_out = tf.read_outputs(cfg, state)
-    ansible.set_tf_outputs(tf_out)
+    cluster.set_tf_outputs(tf_out)
     kube.connect(cfg, tf_out)
 
     cfg.apply_overlay(state.load_providers())
@@ -498,7 +498,7 @@ def _apply_gke(cfg, args) -> int:
                                  pull_config=kube.pull_config(cfg))
     storage_engine.check_identity(cfg, storage, r)
     if state.data.get("applied_assets") and bundle_changes(state, cfg):
-        ansible.pause_machine_specs(cfg)
+        cluster.pause_machine_specs(cfg)
     kube.deploy(cfg, r, state, args.out_dir, tf_out)
     gke.record(cfg, state)
     return _finish(cfg, args, state, r, key, storage, assets_root,
@@ -559,12 +559,12 @@ def check_network_mode(cfg, state) -> None:
     if not state.data.get("applied_assets"):
         return
     want = cfg.network_mode
-    deployed = ansible.deployed_network_modes(cfg)
+    deployed = cluster.deployed_network_modes(cfg)
     differ = sorted(n for n, mode in deployed.items() if mode != want)
     recorded = state.data.get("network_mode")
     if not differ and (deployed or recorded in (None, want)):
         return
-    count = ansible.machine_count(cfg)
+    count = cluster.machine_count(cfg)
     where = ", ".join(differ) if differ else "the cluster (installer state)"
     if count:
         raise InstallError(
@@ -581,7 +581,7 @@ def ensure_egress_ca(cfg, state) -> None:
     keep trusting it. Otherwise make one."""
     if state.egress_ca() is not None or not cfg.nodes_with("worker"):
         return
-    found = ansible.worker_egress_ca(cfg) if state.data.get("applied_assets") else None
+    found = cluster.worker_egress_ca(cfg) if state.data.get("applied_assets") else None
     if found:
         name, cert, key = found
         state.store_egress_ca(cert, key)
@@ -665,9 +665,9 @@ def cmd_ctl(args) -> int:
     data = None if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
     with remote_state.synced(cfg, args.state_dir, rescue_dir=PULLED_STATE):
         state = State(args.state_dir)
-        ansible.set_keys_dir(state.keys_dir)
-        ansible.set_tf_outputs(tf.cached_outputs(state))
-        res = ansible.ctl(cfg, shlex.join(argv), check=False, quiet=True, input=data or None)
+        cluster.set_keys_dir(state.keys_dir)
+        cluster.set_tf_outputs(tf.cached_outputs(state))
+        res = cluster.ctl(cfg, shlex.join(argv), check=False, quiet=True, input=data or None)
     sys.stdout.write(res.stdout or "")
     sys.stderr.write(res.stderr or "")
     return res.returncode

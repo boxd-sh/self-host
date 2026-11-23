@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import config, license, main, render, tf, windows
+from boxd_installer import cluster, config, license, main, render, tf, windows
 from boxd_installer.util import InstallError
 
 from test_gke_config import gke_doc
@@ -348,7 +348,7 @@ class Configure(unittest.TestCase):
             seen.append(command)
             failed = fail_on is not None and command.startswith(fail_on)
             return mock.Mock(returncode=1 if failed else 0, stdout="", stderr="boom" if failed else "")
-        with mock.patch.object(windows.ansible, "ctl", side_effect=ctl), \
+        with mock.patch.object(windows.cluster, "ctl", side_effect=ctl), \
              mock.patch.object(windows, "log"):
             windows.configure(cfg, alloc)
         return seen

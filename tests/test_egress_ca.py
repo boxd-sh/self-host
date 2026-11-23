@@ -89,7 +89,7 @@ class Ensure(unittest.TestCase):
         self.state = State(self.dir)
 
     def ensure(self, worker_pair=None):
-        with mock.patch.object(main.ansible, "worker_egress_ca",
+        with mock.patch.object(main.cluster, "worker_egress_ca",
                                return_value=worker_pair) as read, \
                 mock.patch.object(main, "generate_egress_ca",
                                   return_value=("NEW-CERT", "NEW-KEY")) as gen, \

@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from unittest import mock
 
-from boxd_installer import ansible, config, local_ca, main, render, storage_engine, tf
+from boxd_installer import cluster, config, local_ca, main, render, storage_engine, tf
 from boxd_installer.state import State
 from boxd_installer.util import InstallError
 
@@ -332,8 +332,8 @@ class Guard(Base):
         if cached:
             with open(os.path.join(self.dir, "tf-outputs.json"), "w") as fh:
                 json.dump({"nodes": {}}, fh)
-        with mock.patch.object(storage_engine.ansible, "ctl", ctl), \
-                mock.patch.object(storage_engine.ansible, "set_tf_outputs"):
+        with mock.patch.object(storage_engine.cluster, "ctl", ctl), \
+                mock.patch.object(storage_engine.cluster, "set_tf_outputs"):
             return storage_engine.check_guard(cfg, self.state, bundle(list(features)))
 
     def test_not_engaged_on_a_fresh_cluster(self):
@@ -390,7 +390,7 @@ class Guard(Base):
 
 class Identity(Base):
     def check(self, ctx, identity, deployed):
-        with mock.patch.object(storage_engine.ansible, "deployed_bucket_identities",
+        with mock.patch.object(storage_engine.cluster, "deployed_bucket_identities",
                                return_value=deployed):
             storage_engine.check_identity(self.cfg(), ctx, FakeRenderer(identity))
 
@@ -414,21 +414,21 @@ class Identity(Base):
 
 class AdoptPrefix(Base):
     def test_the_workers_prefix_is_kept(self):
-        with mock.patch.object(storage_engine.ansible, "deployed_bucket_identities",
+        with mock.patch.object(storage_engine.cluster, "deployed_bucket_identities",
                                return_value={WORKER: {"prefix": "engine/hand-1", "bucket": "b"}}):
             storage_engine.adopt_prefix(self.cfg(), self.state)
         self.assertEqual(self.state.storage_prefix(), "engine/hand-1")
 
     def test_a_prefix_in_state_wins(self):
         first = self.state.storage_prefix()
-        with mock.patch.object(storage_engine.ansible, "deployed_bucket_identities") as read:
+        with mock.patch.object(storage_engine.cluster, "deployed_bucket_identities") as read:
             storage_engine.adopt_prefix(self.cfg(), self.state)
         read.assert_not_called()
         self.assertEqual(self.state.storage_prefix(), first)
 
 class BucketOpen(Base):
     def wait(self, lines):
-        with mock.patch.object(storage_engine.ansible, "worker_bucket_line", side_effect=lines):
+        with mock.patch.object(storage_engine.cluster, "worker_bucket_line", side_effect=lines):
             storage_engine.wait_bucket_open(self.cfg(), timeout=60)
 
     def test_open(self):
@@ -449,14 +449,14 @@ class BucketOpen(Base):
             self.wait(lambda *a: "")
 
     def test_without_the_engine_nothing_is_read(self):
-        with mock.patch.object(storage_engine.ansible, "worker_bucket_line") as read:
+        with mock.patch.object(storage_engine.cluster, "worker_bucket_line") as read:
             storage_engine.wait_bucket_open(self.cfg(aws_doc()))
         read.assert_not_called()
 
 class Switches(Base):
     def run_switches(self, ctl, doc=None, ctx=None):
         push = mock.Mock()
-        with mock.patch.object(storage_engine.ansible, "ctl", ctl):
+        with mock.patch.object(storage_engine.cluster, "ctl", ctl):
             storage_engine.set_switches(self.cfg(doc), self.state,
                                         ctx or storage_engine.Context(None, None),
                                         FakeRenderer(), push)
@@ -478,7 +478,7 @@ class Switches(Base):
         ctl = Ctl()
         order = []
         push = mock.Mock(side_effect=lambda: order.append(len(ctl.commands)))
-        with mock.patch.object(storage_engine.ansible, "ctl", ctl):
+        with mock.patch.object(storage_engine.cluster, "ctl", ctl):
             storage_engine.set_switches(self.cfg(), self.state, storage_engine.Context(None, None),
                                         FakeRenderer(), push)
         self.assertEqual(ctl.commands[order[0] - 1], "cluster set-storage-catalog on")
@@ -545,9 +545,9 @@ class Switches(Base):
 class BucketTemplates(unittest.TestCase):
     def seed(self, fake, storage):
         cfg = config.Config(engine_doc())
-        with mock.patch.object(ansible, "ctl", fake), mock.patch.object(ansible.time, "sleep"), \
+        with mock.patch.object(cluster, "ctl", fake), mock.patch.object(cluster.time, "sleep"), \
                 contextlib.redirect_stderr(io.StringIO()):
-            ansible.seed_templates(cfg, "computer", "v1", "abcdef0123456789", storage=storage)
+            cluster.seed_templates(cfg, "computer", "v1", "abcdef0123456789", storage=storage)
 
     def test_bucket_templates_have_their_own_names_and_storage(self):
         fake = FakeCtl()
@@ -641,9 +641,10 @@ class ApplyOrder(unittest.TestCase):
                                  write_tfvars=mock.DEFAULT,
                                  instance_types=mock.Mock(return_value={}),
                                  network=mock.Mock(return_value=(None, {}))), \
-             mock.patch.multiple(main.ansible, set_keys_dir=mock.DEFAULT,
+             mock.patch.object(main.ansible, "converge", calls.converge), \
+             mock.patch.multiple(main.cluster, set_keys_dir=mock.DEFAULT,
                                  set_tf_outputs=mock.DEFAULT, preflight=mock.DEFAULT,
-                                 converge=calls.converge, wait_for_leader=mock.DEFAULT,
+                                 wait_for_leader=mock.DEFAULT,
                                  sync_config=mock.DEFAULT,
                                  deployed_network_modes=mock.Mock(return_value={}),
                                  machine_count=mock.Mock(return_value=0),
